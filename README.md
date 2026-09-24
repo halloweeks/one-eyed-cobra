@@ -1,3 +1,10 @@
+## Author
+
+**One-Eyed Cobra (OEC)** was originally created and developed by **Hallo Weeks**.
+
+The project is open for contributions, improvements, and further development.
+
+
 # One-Eyed Cobra (OEC)
 
 OEC is built for a specific purpose: real-time object detection running
