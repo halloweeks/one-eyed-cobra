@@ -164,16 +164,18 @@ wired together correctly — a bug anywhere in that chain typically prevents
 even a tiny dataset from being memorized.
 
 **Result:** a 4-sample, 64×64 training run converged to a loss of
-`~0.0003`, and the saved checkpoint reproduced one training sample almost
+`~0.000015`, and the saved checkpoint reproduced one training sample almost
 exactly on inference:
+
+`dataset/test/images/img_00001.png`
 
 | | Predicted | Label | Difference |
 |---|---|---|---|
-| confidence | 0.999977 | 1.0 | 0.00002 |
-| x | 0.501324 | 0.501340 | 0.000016 |
-| y | 0.338572 | 0.338576 | 0.000004 |
-| w | 0.392692 | 0.392507 | 0.000185 |
-| h | 0.517463 | 0.517091 | 0.000372 |
+| confidence | 0.999945 | 1.000000 | 0.000055 |
+| x | 0.509082 | 0.509070 | 0.000012 |
+| y | 0.333025 | 0.331856 | 0.001169 |
+| w | 0.408065 | 0.413232 | 0.005167 |
+| h | 0.528929 | 0.524524 | 0.004405 |
 
 This confirms the pipeline is implemented correctly. It is a memorization
 result, not a generalization result — it says nothing yet about accuracy
