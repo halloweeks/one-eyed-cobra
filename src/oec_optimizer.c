@@ -5,6 +5,19 @@
 #include "oec_layer.h"
 #include "oec_conv.h"
 
+/**
+ * Initializes a new optimizer instance with the requested update rule and
+ * learning rate.
+ *
+ * The optimizer stores the algorithm type, learning rate, and default
+ * hyperparameters for momentum, RMSProp, and Adam. The returned object is
+ * ready to be bound to a model during the first optimization step.
+ *
+ * @param type The optimizer algorithm to use.
+ * @param learning_rate Base step size applied to parameter gradients.
+ * @return Newly allocated optimizer on success, or NULL when memory allocation
+ *         fails.
+ */
 OEC_OPTIMIZER *oec_optimizer_init(OEC_OPTIMIZER_TYPE type, float learning_rate)
 {
 	// OEC_OPTIMIZER *opt = calloc(1, sizeof(OEC_OPTIMIZER));
@@ -34,6 +47,18 @@ OEC_OPTIMIZER *oec_optimizer_init(OEC_OPTIMIZER_TYPE type, float learning_rate)
 	return optimizer;
 }
 
+/**
+ * Allocates and initializes the persistent optimizer state for a given model.
+ *
+ * This function inspects the model's layer list and reserves memory for the
+ * per-layer moving averages or squared-gradient buffers required by the chosen
+ * optimizer. It is called lazily from oec_optimizer_step() before the first
+ * update is applied.
+ *
+ * @param optimizer Optimizer whose state is being prepared.
+ * @param model Model whose layer parameters must be tracked.
+ * @return 1 on success, 0 on invalid input or allocation failure.
+ */
 static int oec_optimizer_state_init(OEC_OPTIMIZER *optimizer, OEC_MODEL *model)
 {
 	if (optimizer == NULL || model == NULL)
@@ -285,7 +310,14 @@ static int oec_optimizer_state_init(OEC_OPTIMIZER *optimizer, OEC_MODEL *model)
 	}
 }
 
-
+/**
+ * Resets all gradient buffers on convolutional layers in the model to zero.
+ *
+ * This is typically called at the start of a training iteration before the
+ * backpropagation pass accumulates the next set of parameter gradients.
+ *
+ * @param model Model whose accumulated gradients should be cleared.
+ */
 void oec_optimizer_zero_grad(OEC_MODEL *model)
 {
 	if (model == NULL) {
@@ -318,7 +350,16 @@ void oec_optimizer_zero_grad(OEC_MODEL *model)
 	}
 }
 
-
+/**
+ * Applies a single SGD update step to all convolutional parameters.
+ *
+ * Each weight and bias is adjusted by subtracting the learning rate multiplied
+ * by the corresponding gradient. This is the simplest optimizer strategy and
+ * requires no persistent state beyond the model parameters themselves.
+ *
+ * @param optimizer Optimizer configuration that supplies the learning rate.
+ * @param model Model containing the parameters to update.
+ */
 static void oec_optimizer_sgd_step(OEC_OPTIMIZER *optimizer, OEC_MODEL *model) {
 	/*
 	 * NULL checks are handled by oec_optimizer_step().
@@ -349,6 +390,17 @@ static void oec_optimizer_sgd_step(OEC_OPTIMIZER *optimizer, OEC_MODEL *model) {
 	}
 }
 
+/**
+ * Applies a momentum-based update, maintaining a velocity term for each
+ * parameter.
+ *
+ * The velocity is updated with a moving average of past gradients and then used
+ * as the direction for the step. This helps accelerate learning along consistent
+ * descent directions while dampening oscillations.
+ *
+ * @param optimizer Optimizer configuration and momentum state.
+ * @param model Model whose convolutional weights and biases are being updated.
+ */
 static void oec_optimizer_momentum_step(OEC_OPTIMIZER *optimizer, OEC_MODEL *model) {
 	/*
 	 * NULL checks are handled by oec_optimizer_step().
@@ -393,6 +445,16 @@ static void oec_optimizer_momentum_step(OEC_OPTIMIZER *optimizer, OEC_MODEL *mod
 	}
 }
 
+/**
+ * Applies an RMSProp update using a decaying average of squared gradients.
+ *
+ * The optimizer tracks the running square of each gradient so that each
+ * parameter is scaled by the reciprocal square root of its recent magnitude.
+ * This stabilizes updates when gradients vary widely in scale.
+ *
+ * @param optimizer Optimizer carrying the learning rate, decay, and epsilon.
+ * @param model Model containing the parameters to update.
+ */
 static void oec_optimizer_rmsprop_step(OEC_OPTIMIZER *optimizer, OEC_MODEL *model)
 {
 	/*
@@ -441,6 +503,17 @@ static void oec_optimizer_rmsprop_step(OEC_OPTIMIZER *optimizer, OEC_MODEL *mode
 	}
 }
 
+/**
+ * Applies an Adam update with first- and second-moment estimates.
+ *
+ * Bias corrections are applied to the running means and variances before the
+ * update; this keeps early training steps from being systematically biased
+ * toward zero. Adam typically converges more reliably on noisy or sparse
+ * gradient patterns than pure SGD variants.
+ *
+ * @param optimizer Optimizer containing the Adam hyperparameters and state.
+ * @param model Model whose convolutional weights and biases are being updated.
+ */
 static void oec_optimizer_adam_step(OEC_OPTIMIZER *optimizer, OEC_MODEL *model)
 {
 	/*
@@ -510,6 +583,16 @@ static void oec_optimizer_adam_step(OEC_OPTIMIZER *optimizer, OEC_MODEL *model)
 	}
 }
 
+/**
+ * Dispatches the optimizer's update rule for one training step.
+ *
+ * The first call performs lazy initialization of the internal state for the
+ * selected optimizer type. After initialization, the function chooses the
+ * corresponding per-optimizer update routine and applies it to the model.
+ *
+ * @param optimizer Optimizer instance to execute.
+ * @param model Model whose parameter values should be adjusted.
+ */
 void oec_optimizer_step(OEC_OPTIMIZER *optimizer, OEC_MODEL *model)
 {
 	if (optimizer == NULL || model == NULL) {
@@ -547,6 +630,15 @@ void oec_optimizer_step(OEC_OPTIMIZER *optimizer, OEC_MODEL *model)
 	}
 }
 
+/**
+ * Frees the optimizer's internal state buffers and resets the state pointer.
+ *
+ * Depending on the optimizer type, this releases arrays used for momentum,
+ * RMSProp accumulators, or Adam moments/velocities. The function is called from
+ * oec_optimizer_free() before destroying the optimizer object itself.
+ *
+ * @param optimizer Optimizer whose allocated state memory should be released.
+ */
 static void oec_optimizer_state_free(OEC_OPTIMIZER *optimizer)
 {
 	if (optimizer == NULL || optimizer->state == NULL) {
@@ -622,6 +714,15 @@ static void oec_optimizer_state_free(OEC_OPTIMIZER *optimizer)
 	optimizer->state = NULL;
 }
 
+/**
+ * Releases the optimizer object and all state associated with it.
+ *
+ * This destructor-like function first frees the optimizer's internal state, then
+ * deallocates the optimizer structure itself. It should be called when the
+ * training run is complete or before replacing the optimizer instance.
+ *
+ * @param optimizer Optimizer instance to destroy.
+ */
 void oec_optimizer_free(OEC_OPTIMIZER *optimizer)
 {
 	if (optimizer == NULL) {
