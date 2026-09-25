@@ -247,11 +247,11 @@ int main(void)
 			"Epoch %d/%d  loss = %.6f\n",
 			epoch + 1,
 			EPOCHS,
-			total_loss / (float)dataset->train.count
+			total_loss / (float)dataset->test.count
 		);
 		
 		
-		float epoch_loss = total_loss / dataset->train.count;
+		float epoch_loss = total_loss / dataset->test.count;
 		/*
 		 * Save the model whenever this is
 		 * the lowest loss seen so far.
