@@ -36,77 +36,90 @@
 
 int main(void)
 {
-	OEC_DATASET *dataset = oec_dataset_open("dataset");
+	OEC_TRAINER trainer;
 	
-	if (!dataset) {
+	trainer.dataset = oec_dataset_open("dataset");
+	
+	if (!trainer.dataset) {
 		fprintf(stderr, "Failed to open dataset\n");
+		oec_trainer_free(&trainer);
 		return EXIT_FAILURE;
 	}
 	
-	if (dataset->train.count == 0) {
+	if (trainer.dataset->train.count == 0) {
 		fprintf(stderr, "Couldn't found any images in dataset/train\n");
-		oec_dataset_close(dataset);
+		oec_trainer_free(&trainer);
 		return EXIT_FAILURE;
 	}
 	
-	printf("Found %zd training samples: %zd\n", dataset->train.count);
+	printf("Found %zd samples\n", trainer.dataset->train.count);
 	
-	OEC_MODEL *model = oec_model_load(INPUT_MODEL_PATH);
+	trainer.model = oec_model_load(INPUT_MODEL_PATH);
 	
-	if (!model) {
+	if (!trainer.model) {
 		fprintf(stderr, "Failed to load model\n");
-		oec_dataset_close(dataset);
+		oec_trainer_free(&trainer);
 		return EXIT_FAILURE;
 	}
 	
-	printf("Model Total Layers: %d\n", model->count);
+	printf("Model Total Layers: %d\n", trainer.model->count);
 	
-	OEC_TENSOR *last = model->outputs[model->count - 1];
+	OEC_TENSOR *last = trainer.model->outputs[trainer.model->count - 1];
 	
 	if (last->c != 5) {
 		fprintf(stderr, "Model's final layer must output 5 channels (confidence,x,y,w,h), got %d\n", last->c);
-		oec_model_free(model);
-		oec_dataset_close(dataset);
+		oec_trainer_free(&trainer);
 		return EXIT_FAILURE;
 	}
 	
-	OEC_TENSOR *image = oec_tensor_create(model->input->w, model->input->h, model->input->c);
-	
-	if (image == NULL) {
-		fprintf(stderr, "Failed to allocate tensor!\n");
-		oec_dataset_close(dataset);
-		return EXIT_FAILURE;
-	}
-	
-	printf("model layers: %d\n", model->count);
+	printf("model layers: %d\n", trainer.model->count);
 	printf("model output shape: %dx%dx%d (grid %dx%d)\n", last->w, last->h, last->c, last->w, last->h);
-	// printf(" size: %dx%dx%d\n", model->input->w, model->input->h, model->input->c);
 	
-	OEC_LOSS *loss = oec_loss_create(5.0f, 0.5f, 5.0f);
+	trainer.loss = oec_loss_create(5.0f, 0.5f, 5.0f);
 	
-	if (loss == NULL) {
+	if (trainer.loss == NULL) {
 		fprintf(stderr, "Failed to create loss\n");
+		oec_trainer_free(&trainer);
 		return EXIT_FAILURE;
 	}
 	
-	OEC_OPTIMIZER *optimizer = oec_optimizer_init(OEC_OPTIMIZER_ADAM, LEARNING_RATE);
+	trainer.optimizer = oec_optimizer_init(OEC_OPTIMIZER_ADAM, LEARNING_RATE);
 	
-	if (optimizer == NULL) {
+	if (trainer.optimizer == NULL) {
 		fprintf(stderr, "Failed to create optimizer\n");
-		return 1;
+		oec_trainer_free(&trainer);
+		return EXIT_FAILURE;
 	}
 	
-	OEC_TENSOR *output = oec_tensor_create(last->w, last->h, last->c);
+	trainer.input = oec_tensor_create(trainer.model->input->w, trainer.model->input->h, trainer.model->input->c);
 	
-	OEC_TENSOR *grad = oec_tensor_create(last->w, last->h, last->c);
+	if (trainer.input == NULL) {
+		fprintf(stderr, "Failed to allocate input tensor!\n");
+		oec_trainer_free(&trainer);
+		return EXIT_FAILURE;
+	}
 	
-	OEC_TENSOR *grad_input = oec_tensor_create(model->input->w, model->input->h, model->input->c);
+	trainer.output = oec_tensor_create(last->w, last->h, last->c);
 	
-	if (grad == NULL) {
+	if (trainer.output == NULL) {
+		fprintf(stderr, "Failed to allocate output tensor\n");
+		oec_trainer_free(&trainer);
+		return EXIT_FAILURE;
+	}
+	
+	trainer.grad = oec_tensor_create(last->w, last->h, last->c);
+	
+	if (trainer.grad == NULL) {
 		fprintf(stderr, "Failed to create loss gradient tensor\n");
-		oec_model_free(model);
-		oec_tensor_free(image);
-		oec_dataset_close(dataset);
+		oec_trainer_free(&trainer);
+		return EXIT_FAILURE;
+	}
+	
+	trainer.grad_input = oec_tensor_create(trainer.model->input->w, trainer.model->input->h, trainer.model->input->c);
+	
+	if (trainer.grad_input == NULL) {
+		fprintf(stderr, "Failed to allocate input gradient tensor\n");
+		oec_trainer_free(&trainer);
 		return EXIT_FAILURE;
 	}
 	
@@ -115,47 +128,54 @@ int main(void)
 	for (int epoch = 0; epoch < EPOCHS; epoch++) {
 		float total_loss = 0.0f;
 		
-		for (size_t i = 0; i < dataset->train.count; i++) {
-			OEC_SAMPLE *sample = &dataset->train.samples[i];
+		for (size_t i = 0; i < trainer.dataset->train.count; i++) {
+			OEC_SAMPLE *sample = &trainer.dataset->train.samples[i];
 			
-			OEC_SAMPLE_DATA data = oec_dataset_load_sample(sample, image);
+			OEC_SAMPLE_DATA data = oec_dataset_load_sample(sample, trainer.input);
 			
 			OEC_TARGET target = select_target(&data);
 			
-			oec_optimizer_zero_grad(model);
+			oec_optimizer_zero_grad(trainer.model);
 			
-			if (oec_model_forward(model, image, output) != 0) {
+			if (oec_model_forward(trainer.model, trainer.input, trainer.output) != 0) {
 				fprintf(stderr, "Model forward failed\n");
+				oec_trainer_free(&trainer);
 				return EXIT_FAILURE;
 			}
 			
-			float sample_loss = oec_loss_forward(loss, output, &target);
+			float sample_loss = oec_loss_forward(trainer.loss, trainer.output, &target);
 			total_loss += sample_loss;
 			
-			if (oec_loss_backward(loss, output, &target, grad) != 0) {
+			if (oec_loss_backward(trainer.loss, trainer.output, &target, trainer.grad) != 0) {
 				fprintf(stderr, "Loss backward failed\n");
+				oec_trainer_free(&trainer);
 				return EXIT_FAILURE;
 			}
 			
-			oec_model_backward(model, grad, grad_input);
+			if (oec_model_backward(trainer.model, trainer.grad, trainer.grad_input) != 0) {
+				fprintf(stderr, "Model backward failed\n");
+				oec_trainer_free(&trainer);
+				return EXIT_FAILURE;
+			}
 			
-			oec_optimizer_step(optimizer, model);
+			oec_optimizer_step(trainer.optimizer, trainer.model);
 		}
 		
 		printf(
 			"Epoch %d/%d  loss = %.6f\n",
 			epoch + 1,
 			EPOCHS,
-			total_loss / (float)dataset->train.count
+			total_loss / (float)trainer.dataset->train.count
 		);
 		
-		float epoch_loss = total_loss / dataset->train.count;
+		float epoch_loss = total_loss / trainer.dataset->train.count;
 		
 		if (epoch_loss < best_loss) {
 			best_loss = epoch_loss;
 			
-			if (oec_model_save(model, "finetune_best.oec") != 0) {
+			if (oec_model_save(trainer.model, "finetune_best.oec") != 0) {
 				fprintf(stderr, "Failed to save best model\n");
+				oec_trainer_free(&trainer);
 				return EXIT_FAILURE;
 			}
 			
@@ -163,19 +183,14 @@ int main(void)
 		}
 	}
 	
-	if (oec_model_save(model, "finetune_last.oec") != 0) {
-		fprintf(stderr, "Failed to save model\n");
+	if (oec_model_save(trainer.model, "finetune_last.oec") != 0) {
+		fprintf(stderr, "Failed to save finetune_last.oec\n");
+		oec_trainer_free(&trainer);
+		return EXIT_FAILURE;
 	}
 	
 	printf("Model saved: finetune_last.oec\n");
 	
-	oec_tensor_free(grad_input);
-	oec_tensor_free(grad);
-	oec_tensor_free(output);
-	oec_tensor_free(image);
-	oec_model_free(model);
-	oec_loss_free(loss);
-	oec_dataset_close(dataset);
-	oec_optimizer_free(optimizer);
+	oec_trainer_free(&trainer);
     return 0;
 }
