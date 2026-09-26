@@ -213,4 +213,4 @@ the single-scale pipeline is fully validated end-to-end.
 
 ## License
 
-*(add your chosen license here)*
+NONE
