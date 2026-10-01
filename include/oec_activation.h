@@ -5,19 +5,21 @@
 
 typedef enum {
 	OEC_ACTIVATION_RELU = 0,
+	OEC_ACTIVATION_RELU6,
 	OEC_ACTIVATION_SIGMOID,
 	OEC_ACTIVATION_TANH,
-	OEC_ACTIVATION_LEAKY_RELU
+	OEC_ACTIVATION_LEAKY_RELU,
+	OEC_ACTIVATION_GELU
 } OEC_ACTIVATION_TYPE;
 
 typedef struct {
 	OEC_ACTIVATION_TYPE type;
 	union {
-		float alpha; /* Leaky ReLU */
+		float alpha; // Leaky ReLU
 	} param;
 } OEC_ACTIVATION;
 
-/* Activation */
+// Activation
 int oec_activation_forward(
 	const OEC_ACTIVATION *activation,
 	const OEC_TENSOR *input,
