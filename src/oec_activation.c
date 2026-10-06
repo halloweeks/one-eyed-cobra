@@ -169,7 +169,7 @@ int oec_activation_forward(const OEC_ACTIVATION *activation, const OEC_TENSOR *i
 		case OEC_ACTIVATION_GELU: 
 			oec_gelu_forward(input, output);
 			break;
-		default:{
+		default:
 			return -1;
 	}
 	
