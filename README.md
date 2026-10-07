@@ -22,7 +22,3 @@ cd one-eyed-cobra
 
 ### License
 Not decided yet.
-
-**Author:** Hallo Weeks<br>
-**GitHub:** @halloweeks<br>
-**Telegram:** @halloweeks
