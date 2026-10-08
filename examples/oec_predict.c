@@ -1,20 +1,8 @@
 /*
  * One-Eyed Cobra (OEC)
  *
- * A dedicated, single-object detection engine written in pure C for
- * resource-constrained embedded CPUs / SoCs. Not a general-purpose,
- * multi-class detector like YOLO's 80-class COCO models — OEC is built
- * to find one specific kind of object per frame, kept small and fast
- * enough to run directly on the target device with no external ML
- * runtime and no GPU dependency.
- *
  * Author:    Hallo Weeks
  * Copyright: (C) 2026 Hallo Weeks
- *
- * Contact:
- *   Email:    halloweeks@gmail.com
- *   Telegram: @halloweeks
- *   GitHub:   @halloweeks
  *
  * This software is provided "as is", without warranty of any kind,
  * express or implied.
@@ -69,7 +57,7 @@ int main(void) {
 	}
 	
 	// Detection threshold
-	if (output.confidence < 0.00) {
+	if (output.confidence < 0.90) {
 		printf("Target not found!\n");
 		printf("presence = %.6f\n", output.confidence);
 		oec_image_free(&image);
