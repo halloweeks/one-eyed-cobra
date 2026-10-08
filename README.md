@@ -26,13 +26,14 @@ AI-assisted development is allowed in OEC.
 
 However, contributors **must not blindly commit AI-generated code**. Any AI-assisted code must be:
 
-- Reviewed and understood by the contributor.
+- Reviewed and fully understood by the contributor.
 - Tested and verified before submission.
 - Consistent with OEC's coding style and architecture.
 - Free from unnecessary complexity, unused code, or unexplained changes.
 - Maintained by the contributor after the pull request is submitted.
+- **Clearly identified as AI-assisted in the pull request.** The contributor must mention which AI assistant was used and how it was used.
 
-Using AI does **not** transfer responsibility for the code to the AI. The contributor submitting the pull request is responsible for understanding and maintaining their changes.
+Using AI does **not** transfer responsibility for the code to the AI. The contributor submitting the pull request is responsible for understanding, testing, and maintaining their changes.
 
 **AI is a development tool, not a replacement for code review or engineering judgment.**
 
