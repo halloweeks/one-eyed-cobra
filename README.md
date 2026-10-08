@@ -31,7 +31,7 @@ However, contributors **must not blindly commit AI-generated code**. Any AI-assi
 - Consistent with OEC's coding style and architecture.
 - Free from unnecessary complexity, unused code, or unexplained changes.
 - Maintained by the contributor after the pull request is submitted.
-- **Clearly identified as AI-assisted in the pull request.** The contributor must mention which AI assistant was used and how it was used.
+- **Clearly mentioned as being made with the help of an AI assistant** in the pull request.
 
 Using AI does **not** transfer responsibility for the code to the AI. The contributor submitting the pull request is responsible for understanding, testing, and maintaining their changes.
 
