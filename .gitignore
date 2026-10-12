@@ -1,0 +1,14 @@
+*
+
+!/src/
+!/src/**
+
+!/include/
+!/include/**
+
+!/CMakeLists.txt
+!/build.sh
+!/README.md
+!/LICENSE
+!/.gitignore
+!/.gitattributes
