@@ -2,7 +2,7 @@
 #define OEC_LAYER_H
 
 #include "oec_tensor.h"
-#include "oec_conv.h"
+#include "oec_convolution.h"
 #include "oec_activation.h"
 
 typedef enum {

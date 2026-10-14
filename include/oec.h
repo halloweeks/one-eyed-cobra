@@ -4,7 +4,7 @@
 #include "oec_tensor.h"
 #include "oec_target.h"
 #include "oec_activation.h"
-#include "oec_conv.h"
+#include "oec_convolution.h"
 #include "oec_layer.h"
 #include "oec_model.h"
 #include "oec_loss.h"

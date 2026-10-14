@@ -14,7 +14,7 @@ add_library(oec
     src/oec_tensor.c
     src/oec_image.c
     src/oec_model.c
-    src/oec_conv.c
+    src/oec_convolution.c
     src/oec_activation.c
     src/oec_layer.c
     src/oec_loss.c

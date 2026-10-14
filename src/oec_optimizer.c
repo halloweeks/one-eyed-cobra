@@ -3,7 +3,7 @@
 
 #include "oec_optimizer.h"
 #include "oec_layer.h"
-#include "oec_conv.h"
+#include "oec_convolution.h"
 
 /**
  * Initializes a new optimizer instance with the requested update rule and

@@ -1,6 +1,6 @@
 #include <stdlib.h>
 #include <math.h>
-#include "oec_conv.h"
+#include "oec_convolution.h"
 
 OEC_CONV *oec_conv_create(int in_channels, int out_channels, int kernel, int stride)
 {
