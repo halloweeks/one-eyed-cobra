@@ -20,6 +20,19 @@ git clone -b dev https://github.com/halloweeks/one-eyed-cobra.git
 cd one-eyed-cobra
 ```
 
+## Noticed
+
+This project heavily used AI tools to **maximize development speed**.
+
+Different AI tools were used for different problems:
+
+- **Claude** — code writing and review
+- **ChatGPT** — designing the foundation and organizing the structure
+- **DeepSeek** — code analysis and suggestions
+- **GitHub Copilot** — README, documentation, and organization
+
+AI didn't replace the development process. It accelerated it.
+
 ### AI-Assisted Contributions
 
 AI-assisted development is allowed in OEC.
