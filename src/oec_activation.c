@@ -22,7 +22,8 @@ static void oec_relu_backward(const OEC_TENSOR *input, const OEC_TENSOR *grad_ou
 }
 
 // ReLU6 forward
-static void oec_relu6_forward(const OEC_TENSOR *input, OEC_TENSOR *output) {
+static void oec_relu6_forward(const OEC_TENSOR *input, OEC_TENSOR *output)
+{
 	size_t count = (size_t)input->w * (size_t)input->h * (size_t)input->c;
 	
 	for (size_t i = 0; i < count; i++) {
