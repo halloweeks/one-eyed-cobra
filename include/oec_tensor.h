@@ -38,8 +38,37 @@ void oec_tensor_free(
 	OEC_TENSOR *tensor
 );
 
+/*
+ * Build a CHW tensor from an image, keeping its color layout:
+ * 1 or 2 channels (gray / gray+alpha) -> 1 plane,
+ * 3 or 4 channels (RGB / RGBA)        -> 3 planes.
+ */
 OEC_TENSOR *oec_tensor_from_image(
 	const OecImage *image
+);
+
+/*
+ * Build a CHW tensor with an explicit channel count (1 or 3).
+ *
+ * RGB -> 1 channel : luminance (see oec_rgb_to_gray)
+ * gray -> 3 channel: the gray plane is replicated
+ *
+ * Use this with model->input->c so the image always matches
+ * the channel count the model was trained with.
+ */
+OEC_TENSOR *oec_tensor_from_image_channels(
+	const OecImage *image,
+	int channels
+);
+
+/*
+ * RGB -> gray, used by both training (dataset loader) and
+ * inference so both see identical pixel values.
+ */
+float oec_rgb_to_gray(
+	float r,
+	float g,
+	float b
 );
 
 #endif

@@ -13,7 +13,7 @@
 #include <time.h>
 #include <math.h>
 
-// core
+// core implement 
 #include "oec.h"
 
 int main(void) {
@@ -21,20 +21,26 @@ int main(void) {
 	OEC_TENSOR *input;
 	
 	// Load model
-	OEC_MODEL *model = oec_model_load("finetune_last.oec");//"pretrained_best.oec"); //"finetune_best.oec");
+	OEC_MODEL *model = oec_model_load("pretrained_best.oec");
 	
 	if (!model) {
 		printf("load failed\n");
 		return EXIT_FAILURE;
 	}
 	
-	if (oec_image_load("dataset/train/images/img_00033.png", &image) != 0) {
+	if (oec_image_load("dataset/train/images/img_00004.png", &image) != 0) {
 		fprintf(stderr, "Failed to load input image\n");
 		oec_model_free(model);
 		return EXIT_FAILURE;
 	}
 	
-	input = oec_tensor_from_image(&image);
+	printf("Model input: %dx%dx%d (%s), image: %dx%dx%d\n",
+		model->input->w, model->input->h, model->input->c,
+		model->input->c == 1 ? "grayscale" : "RGB",
+		image.width, image.height, image.channels);
+	
+	// Convert the image to the channel count the model was trained with.
+	input = oec_tensor_from_image_channels(&image, model->input->c);
 	
 	if (input == NULL) {
 		fprintf(stderr, "Tensor error!\n");
@@ -57,7 +63,7 @@ int main(void) {
 	}
 	
 	// Detection threshold
-	if (output.confidence < 0.90) {
+	if (output.confidence < 0.20) {
 		printf("Target not found!\n");
 		printf("presence = %.6f\n", output.confidence);
 		oec_image_free(&image);
@@ -74,9 +80,20 @@ int main(void) {
 	printf("w = %f\n", output.width);
 	printf("h = %f\n", output.height);
 	
+	// Drawing and saving work on RGB, so make an RGB view (gray input is replicated).
+	OecImage view;
+	
+	if (oec_image_to_rgb(&image, &view) != 0) {
+		fprintf(stderr, "Failed to create RGB view\n");
+		oec_image_free(&image);
+		oec_model_free(model);
+		oec_tensor_free(input);
+		return EXIT_FAILURE;
+	}
+	
 	// Draw box on that image with predicted information 
 	oec_image_draw_box(
-		&image,
+		&view,
 		output.x,
 		output.y,
 		output.width,
@@ -88,8 +105,9 @@ int main(void) {
 	);
 	
 	// Save output visual image 
-	if (oec_image_save_png("prediction/predict_00033.png", &image) != 0) {
+	if (oec_image_save_png("prediction/predict_00003.png", &view) != 0) {
 		fprintf(stderr, "Failed to save predict image\n");
+		oec_image_free(&view);
 		oec_image_free(&image);
 		oec_model_free(model);
 		return EXIT_FAILURE;
@@ -98,6 +116,7 @@ int main(void) {
 	printf("prediction image saved!\n");
 	
 	oec_tensor_free(input);
+	oec_image_free(&view);
 	oec_image_free(&image);
 	oec_model_free(model);
 	return EXIT_SUCCESS;

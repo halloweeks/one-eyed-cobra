@@ -143,7 +143,7 @@ int oec_image_load(
 {
     int width;
     int height;
-    int channels;
+    int channel;
 
     unsigned char *pixels;
     float *data;
@@ -160,8 +160,8 @@ int oec_image_load(
         filename,
         &width,
         &height,
-        &channels,
-        OEC_IMAGE_CHANNELS
+        &channel,
+        0
     );
 
     if (pixels == NULL) {
@@ -178,7 +178,7 @@ int oec_image_load(
     pixel_count =
         (size_t)width *
         (size_t)height *
-        OEC_IMAGE_CHANNELS;
+        (size_t)channel;
 
     data = malloc(
         pixel_count * sizeof(float)
@@ -210,8 +210,7 @@ int oec_image_load(
 
     image->width = width;
     image->height = height;
-    image->channels =
-        OEC_IMAGE_CHANNELS;
+    image->channels = channel;
 
     image->data = data;
 
@@ -1052,6 +1051,56 @@ int oec_image_grayscale(
             set_pixel(image, x, y, 0, gray);
             set_pixel(image, x, y, 1, gray);
             set_pixel(image, x, y, 2, gray);
+        }
+    }
+
+    return 0;
+}
+
+
+int oec_image_to_rgb(
+    const OecImage *source,
+    OecImage *destination)
+{
+    size_t pixels;
+    size_t i;
+    size_t stride;
+
+    if (source == NULL ||
+        destination == NULL ||
+        source->data == NULL)
+        return -1;
+
+    if (source->width <= 0 ||
+        source->height <= 0 ||
+        source->channels <= 0)
+        return -1;
+
+    if (oec_image_create(
+            destination,
+            source->width,
+            source->height,
+            3) != 0)
+        return -1;
+
+    pixels =
+        (size_t)source->width *
+        (size_t)source->height;
+
+    stride = (size_t)source->channels;
+
+    for (i = 0; i < pixels; i++) {
+        const float *src = &source->data[i * stride];
+        float *dst = &destination->data[i * 3];
+
+        if (source->channels >= 3) {
+            dst[0] = src[0];
+            dst[1] = src[1];
+            dst[2] = src[2];
+        } else {
+            dst[0] = src[0];
+            dst[1] = src[0];
+            dst[2] = src[0];
         }
     }
 
@@ -2422,6 +2471,100 @@ int oec_image_save_png(
             3,
             pixels,
             image->width * 3)) {
+
+        fprintf(
+            stderr,
+            "Failed to save PNG: %s\n",
+            filename
+        );
+
+        free(pixels);
+
+        return -1;
+    }
+
+    free(pixels);
+
+    return 0;
+}
+
+int oec_image_save_png2(
+    const char *filename,
+    const OecImage *image)
+{
+    unsigned char *pixels;
+    size_t pixel_count;
+    size_t i;
+
+    if (filename == NULL ||
+        image == NULL ||
+        image->data == NULL)
+        return -1;
+
+    if (image->width <= 0 ||
+        image->height <= 0 ||
+        image->channels != 3)
+        return -1;
+
+    pixel_count =
+        (size_t)image->width *
+        (size_t)image->height;
+
+    pixels = malloc(pixel_count);
+
+    if (pixels == NULL) {
+        fprintf(
+            stderr,
+            "Failed to allocate grayscale PNG buffer\n"
+        );
+
+        return -1;
+    }
+
+    /*
+     * Convert float RGB to uint8 grayscale.
+     *
+     * Y = 0.299R + 0.587G + 0.114B
+     *
+     * Input:  RGB float values in [0, 1]
+     * Output: Grayscale uint8 values in [0, 255]
+     */
+    for (i = 0; i < pixel_count; i++) {
+        size_t index = i * 3;
+
+        float r = image->data[index];
+        float g = image->data[index + 1];
+        float b = image->data[index + 2];
+
+        float gray;
+
+        if (r < 0.0f) r = 0.0f;
+        if (r > 1.0f) r = 1.0f;
+
+        if (g < 0.0f) g = 0.0f;
+        if (g > 1.0f) g = 1.0f;
+
+        if (b < 0.0f) b = 0.0f;
+        if (b > 1.0f) b = 1.0f;
+
+        gray =
+            0.299f * r +
+            0.587f * g +
+            0.114f * b;
+
+        pixels[i] =
+            (unsigned char)lroundf(
+                gray * 255.0f
+            );
+    }
+
+    if (!stbi_write_png(
+            filename,
+            image->width,
+            image->height,
+            1,
+            pixels,
+            image->width)) {
 
         fprintf(
             stderr,

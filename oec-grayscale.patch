@@ -1,0 +1,769 @@
+diff -ruN --strip-trailing-cr a/include/oec_dataset.h oec/include/oec_dataset.h
+--- a/include/oec_dataset.h	2026-10-18 03:37:18.517294283 +0000
++++ b/include/oec_dataset.h	2026-10-18 03:38:38.199443859 +0000
+@@ -48,11 +48,30 @@
+ OEC_DATASET *oec_dataset_open(const char *root);
+ void oec_dataset_close(OEC_DATASET *dataset);
+ 
++/*
++ * Load an image into a preallocated 1 (gray) or 3 (RGB) channel tensor.
++ * The image is converted to the tensor's channel count and
++ * nearest-neighbor resized to the tensor's width/height.
++ */
+ int oec_dataset_load_image(
+     const char *path,
+     OEC_TENSOR *image
+ );
+ 
++/*
++ * Inspect the image headers of every split and report the channel
++ * count a model for this dataset should use:
++ *
++ *   1  - every image is grayscale
++ *   3  - at least one image is color (gray images are replicated)
++ *  -1  - no readable images
++ *
++ * Only headers are read, images are not decoded.
++ */
++int oec_dataset_detect_channels(
++    const OEC_DATASET *dataset
++);
++
+ OEC_SAMPLE_DATA oec_dataset_load_label(
+     const char *path
+ );
+diff -ruN --strip-trailing-cr a/include/oec_image.h oec/include/oec_image.h
+--- a/include/oec_image.h	2026-10-18 03:37:18.517312326 +0000
++++ b/include/oec_image.h	2026-10-18 03:39:19.129679861 +0000
+@@ -120,6 +120,19 @@
+     OecImage *image
+ );
+ 
++/*
++ * Create a 3-channel RGB copy of an image with any channel count.
++ * Gray (1) and gray+alpha (2) images are replicated into R, G and B,
++ * RGB (3) and RGBA (4) images drop alpha.
++ *
++ * Handy for drawing colored boxes on grayscale input.
++ * The result must be released with oec_image_free().
++ */
++int oec_image_to_rgb(
++    const OecImage *source,
++    OecImage *destination
++);
++
+ int oec_image_invert(
+     OecImage *image
+ );
+diff -ruN --strip-trailing-cr a/include/oec_model.h oec/include/oec_model.h
+--- a/include/oec_model.h	2026-10-18 03:37:18.517370033 +0000
++++ b/include/oec_model.h	2026-10-18 03:39:00.950711859 +0000
+@@ -5,7 +5,21 @@
+ #include "oec_layer.h"
+ 
+ #define OEC_MODEL_MAGIC "OECM"
+-#define OEC_MODEL_VERSION 1
++
++/*
++ * File format versions:
++ *   1 - magic, version, layer_count, layers
++ *   2 - magic, version, layer_count, input_w, input_h, input_c, layers
++ *
++ * Version 1 files do not store the input shape. They are loaded with
++ * the channel count of the first conv layer and the legacy size below.
++ */
++#define OEC_MODEL_VERSION 2
++
++#define OEC_MODEL_LEGACY_INPUT_W 64
++#define OEC_MODEL_LEGACY_INPUT_H 64
++
++#define OEC_MODEL_MAX_INPUT_DIM 16384
+ 
+ typedef struct {
+     uint32_t type;
+diff -ruN --strip-trailing-cr a/include/oec_tensor.h oec/include/oec_tensor.h
+--- a/include/oec_tensor.h	2026-10-18 03:37:18.517446840 +0000
++++ b/include/oec_tensor.h	2026-10-18 03:38:25.727905486 +0000
+@@ -38,8 +38,37 @@
+ 	OEC_TENSOR *tensor
+ );
+ 
++/*
++ * Build a CHW tensor from an image, keeping its color layout:
++ * 1 or 2 channels (gray / gray+alpha) -> 1 plane,
++ * 3 or 4 channels (RGB / RGBA)        -> 3 planes.
++ */
+ OEC_TENSOR *oec_tensor_from_image(
+ 	const OecImage *image
+ );
+ 
++/*
++ * Build a CHW tensor with an explicit channel count (1 or 3).
++ *
++ * RGB -> 1 channel : luminance (see oec_rgb_to_gray)
++ * gray -> 3 channel: the gray plane is replicated
++ *
++ * Use this with model->input->c so the image always matches
++ * the channel count the model was trained with.
++ */
++OEC_TENSOR *oec_tensor_from_image_channels(
++	const OecImage *image,
++	int channels
++);
++
++/*
++ * RGB -> gray, used by both training (dataset loader) and
++ * inference so both see identical pixel values.
++ */
++float oec_rgb_to_gray(
++	float r,
++	float g,
++	float b
++);
++
+ #endif
+diff -ruN --strip-trailing-cr a/src/oec_dataset.c oec/src/oec_dataset.c
+--- a/src/oec_dataset.c	2026-10-18 03:37:18.517832127 +0000
++++ b/src/oec_dataset.c	2026-10-18 03:38:38.199831686 +0000
+@@ -26,7 +26,9 @@
+ 		return -1;
+ 	}
+ 	
+-	if (image->c != 3) {
++	// Supported model inputs: grayscale (1) or RGB (3).
++	if (image->c != 1 && image->c != 3) {
++		fprintf(stderr, "Unsupported tensor channel count: %d (expected 1 or 3)\n", image->c);
+ 		return -1;
+ 	}
+ 	
+@@ -34,16 +36,26 @@
+ 	int src_h;
+ 	int src_c;
+ 	
+-	unsigned char *src = stbi_load(path, &src_w, &src_h, &src_c, 3);
++	// Load with the file's native channel count.
++	unsigned char *src = stbi_load(path, &src_w, &src_h, &src_c, 0);
+ 	
+ 	if (src == NULL) {
++		fprintf(stderr, "Failed to load image: %s\n", path);
+ 		return -1;
+ 	}
+ 	
++	// 1 / 2 channels are gray (+ alpha), 3 / 4 are RGB (+ alpha).
++	int src_is_rgb = src_c >= 3;
++	
+ 	/*
+ 	 * Simple nearest-neighbor resize
+ 	 * and HWC uint8 -> CHW float conversion.
++	 *
++	 * Color is converted to the tensor's channel count here, using
++	 * the same math as oec_tensor_from_image_channels() so training
++	 * and inference see identical pixels.
+ 	 */
++	size_t plane = (size_t)image->h * (size_t)image->w;
+ 	
+ 	for (int y = 0; y < image->h; y++) {
+ 		int sy = (y * src_h) / image->h;
+@@ -51,25 +63,28 @@
+ 		for (int x = 0; x < image->w; x++) {
+ 			int sx = (x * src_w) / image->w;
+ 			
+-			size_t src_index = ((size_t)sy * (size_t)src_w + (size_t)sx) * 3;
+-			
+-			float r = src[src_index + 0] / 255.0f;
+-			float g = src[src_index + 1] / 255.0f;
+-			float b = src[src_index + 2] / 255.0f;
+-			
++			size_t src_index = ((size_t)sy * (size_t)src_w + (size_t)sx) * (size_t)src_c;
+ 			size_t pixel = (size_t)y * (size_t)image->w + (size_t)x;
+ 			
+-			image->data[
+-				(size_t)0 * image->h * image->w + pixel
+-			] = r;
+-			
+-			image->data[
+-				(size_t)1 * image->h * image->w + pixel
+-			] = g;
+-			
+-			image->data[
+-				(size_t)2 * image->h * image->w + pixel
+-			] = b;
++			if (src_is_rgb) {
++				float r = src[src_index + 0] / 255.0f;
++				float g = src[src_index + 1] / 255.0f;
++				float b = src[src_index + 2] / 255.0f;
++				
++				if (image->c == 3) {
++					image->data[0 * plane + pixel] = r;
++					image->data[1 * plane + pixel] = g;
++					image->data[2 * plane + pixel] = b;
++				} else {
++					image->data[pixel] = oec_rgb_to_gray(r, g, b);
++				}
++			} else {
++				float v = src[src_index] / 255.0f;
++				
++				for (int c = 0; c < image->c; c++) {
++					image->data[(size_t)c * plane + pixel] = v;
++				}
++			}
+ 		}
+ 	}
+ 	
+@@ -454,6 +469,48 @@
+     return NULL;
+ }
+ 
++/*
++ * Returns 1 if every image in the split is grayscale, 0 if at least
++ * one is color, -1 if no image header could be read at all.
++ */
++static int split_is_gray(const OEC_DATASET_SPLIT *split, int *readable)
++{
++	for (size_t i = 0; i < split->count; i++) {
++		int w;
++		int h;
++		int c;
++		
++		if (!stbi_info(split->samples[i].image_path, &w, &h, &c)) {
++			continue;
++		}
++		
++		*readable = 1;
++		
++		if (c >= 3) {
++			return 0;
++		}
++	}
++	
++	return 1;
++}
++
++int oec_dataset_detect_channels(const OEC_DATASET *dataset)
++{
++	if (dataset == NULL) {
++		return -1;
++	}
++	
++	int readable = 0;
++	
++	if (!split_is_gray(&dataset->train, &readable) ||
++	    !split_is_gray(&dataset->valid, &readable) ||
++	    !split_is_gray(&dataset->test,  &readable)) {
++		return 3;
++	}
++	
++	return readable ? 1 : -1;
++}
++
+ void oec_dataset_close(OEC_DATASET *dataset)
+ {
+ 	if (!dataset) 
+diff -ruN --strip-trailing-cr a/src/oec_image.c oec/src/oec_image.c
+--- a/src/oec_image.c	2026-10-18 03:37:18.517853484 +0000
++++ b/src/oec_image.c	2026-10-18 03:39:19.130595628 +0000
+@@ -1058,6 +1058,56 @@
+ }
+ 
+ 
++int oec_image_to_rgb(
++    const OecImage *source,
++    OecImage *destination)
++{
++    size_t pixels;
++    size_t i;
++    size_t stride;
++
++    if (source == NULL ||
++        destination == NULL ||
++        source->data == NULL)
++        return -1;
++
++    if (source->width <= 0 ||
++        source->height <= 0 ||
++        source->channels <= 0)
++        return -1;
++
++    if (oec_image_create(
++            destination,
++            source->width,
++            source->height,
++            3) != 0)
++        return -1;
++
++    pixels =
++        (size_t)source->width *
++        (size_t)source->height;
++
++    stride = (size_t)source->channels;
++
++    for (i = 0; i < pixels; i++) {
++        const float *src = &source->data[i * stride];
++        float *dst = &destination->data[i * 3];
++
++        if (source->channels >= 3) {
++            dst[0] = src[0];
++            dst[1] = src[1];
++            dst[2] = src[2];
++        } else {
++            dst[0] = src[0];
++            dst[1] = src[0];
++            dst[2] = src[0];
++        }
++    }
++
++    return 0;
++}
++
++
+ int oec_image_invert(
+     OecImage *image)
+ {
+diff -ruN --strip-trailing-cr a/src/oec_model.c oec/src/oec_model.c
+--- a/src/oec_model.c	2026-10-18 03:37:18.517941020 +0000
++++ b/src/oec_model.c	2026-10-18 03:39:00.953635762 +0000
+@@ -45,6 +45,12 @@
+ 		return -1;
+ 	}
+ 	
++	// The input shape is stored in the file, so the model must be built.
++	if (model->input == NULL) {
++		fprintf(stderr, "save: model has not been built (unknown input shape)\n");
++		return -1;
++	}
++	
+ 	FILE *fp = fopen(path, "wb");
+ 	
+ 	if (fp == NULL) {
+@@ -52,12 +58,19 @@
+ 	}
+ 	
+ 	const char magic[4] = { 'O', 'E', 'C', 'M' };
+-	uint32_t version = 1;
++	uint32_t version = OEC_MODEL_VERSION;
+ 	uint32_t layer_count = (uint32_t)model->count;
+ 	
++	uint32_t input_w = (uint32_t)model->input->w;
++	uint32_t input_h = (uint32_t)model->input->h;
++	uint32_t input_c = (uint32_t)model->input->c;
++	
+ 	if (fwrite(magic, sizeof(magic), 1, fp) != 1 ||
+         fwrite(&version, sizeof(version), 1, fp) != 1 ||
+-        fwrite(&layer_count, sizeof(layer_count), 1, fp) != 1)
++        fwrite(&layer_count, sizeof(layer_count), 1, fp) != 1 ||
++        fwrite(&input_w, sizeof(input_w), 1, fp) != 1 ||
++        fwrite(&input_h, sizeof(input_h), 1, fp) != 1 ||
++        fwrite(&input_c, sizeof(input_c), 1, fp) != 1)
+     {
+         fclose(fp);
+         return -1;
+@@ -249,7 +262,7 @@
+         return NULL;
+     }
+ 
+-    if (version != 1)
++    if (version != 1 && version != OEC_MODEL_VERSION)
+     {
+     	printf("Unsupported version \n");
+         fclose(fp);
+@@ -264,6 +277,37 @@
+         return NULL;
+     }
+ 
++    /*
++     * Input shape (version 2+). Version 1 files don't store it;
++     * it is resolved after the layers are read.
++     */
++    uint32_t input_w = OEC_MODEL_LEGACY_INPUT_W;
++    uint32_t input_h = OEC_MODEL_LEGACY_INPUT_H;
++    uint32_t input_c = 0;
++
++    if (version >= 2)
++    {
++        if (fread(&input_w, sizeof(input_w), 1, fp) != 1 ||
++            fread(&input_h, sizeof(input_h), 1, fp) != 1 ||
++            fread(&input_c, sizeof(input_c), 1, fp) != 1)
++        {
++            fprintf(stderr, "load: truncated header\n");
++            fclose(fp);
++            return NULL;
++        }
++
++        if (input_w == 0 || input_w > OEC_MODEL_MAX_INPUT_DIM ||
++            input_h == 0 || input_h > OEC_MODEL_MAX_INPUT_DIM ||
++            input_c == 0 || input_c > 4)
++        {
++            fprintf(stderr,
++                    "load: invalid input shape %ux%ux%u\n",
++                    input_w, input_h, input_c);
++            fclose(fp);
++            return NULL;
++        }
++    }
++
+     OEC_MODEL *model =
+         oec_model_create((int)layer_count);
+ 
+@@ -274,6 +318,9 @@
+         return NULL;
+     }
+ 
++    /* in_channels of the first conv layer, used to check / infer input_c */
++    int first_conv_in = 0;
++
+     /*
+      * Read layers.
+      */
+@@ -319,6 +366,9 @@
+                 goto fail;
+             }
+ 
++            if (first_conv_in == 0)
++                first_conv_in = (int)in_channels;
++
+             layer =
+                 oec_layer_conv_create(
+                     (int)in_channels,
+@@ -443,9 +493,31 @@
+      * Recreate runtime tensors.
+      *
+      * The model file contains architecture + parameters,
+-     * but runtime input/output/gradient tensors are rebuilt.
++     * but runtime input/output/gradient tensors are rebuilt
++     * from the stored input shape.
+      */
+-    if (oec_model_build(model, 64, 64, 1) != 0)
++    if (first_conv_in == 0)
++    {
++        fprintf(stderr, "load: model has no conv layer\n");
++        oec_model_free(model);
++        return NULL;
++    }
++
++    if (version < 2)
++    {
++        // Legacy file: channels come from the first conv layer.
++        input_c = (uint32_t)first_conv_in;
++    }
++    else if ((int)input_c != first_conv_in)
++    {
++        fprintf(stderr,
++                "load: input channels (%u) do not match the first conv layer (%d)\n",
++                input_c, first_conv_in);
++        oec_model_free(model);
++        return NULL;
++    }
++
++    if (oec_model_build(model, (int)input_w, (int)input_h, (int)input_c) != 0)
+     {
+     	// printf("failed to build loaded model\n");
+         oec_model_free(model);
+@@ -643,24 +715,26 @@
+      * Copy input into model-owned
+      * activation storage.
+      */
++    if (model->input == NULL) {
++        fprintf(stderr, "forward: model has not been built\n");
++        return -1;
++    }
++
++    if (input->w != model->input->w ||
++        input->h != model->input->h ||
++        input->c != model->input->c) {
++        fprintf(stderr,
++            "input shape mismatch: got %dx%dx%d, model expects %dx%dx%d\n",
++            input->w, input->h, input->c,
++            model->input->w, model->input->h, model->input->c);
++        return -1;
++    }
++
+     size_t count =
+         (size_t)input->w *
+         (size_t)input->h *
+         (size_t)input->c;
+ 
+-    size_t expected =
+-        (size_t)model->input->w *
+-        (size_t)model->input->h *
+-        (size_t)model->input->c;
+-
+-    if (count != expected) {
+-    	fprintf(stderr,
+-            "count mismatch: count=%zu expected=%zu\n",
+-            count,
+-            expected);
+-        return -1;
+-       }
+-
+     for (size_t i = 0; i < count; i++)
+         model->input->data[i] = input->data[i];
+ 
+diff -ruN --strip-trailing-cr a/src/oec_optimizer.c oec/src/oec_optimizer.c
+--- a/src/oec_optimizer.c	2026-10-18 03:37:18.517967819 +0000
++++ b/src/oec_optimizer.c	2026-10-18 03:38:25.727642265 +0000
+@@ -1,3 +1,4 @@
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <math.h>
+ 
+diff -ruN --strip-trailing-cr a/src/oec_tensor.c oec/src/oec_tensor.c
+--- a/src/oec_tensor.c	2026-10-18 03:37:18.518070172 +0000
++++ b/src/oec_tensor.c	2026-10-18 03:38:25.728100144 +0000
+@@ -29,7 +29,13 @@
+ 	return tensor;
+ }
+ 
+-OEC_TENSOR *oec_tensor_from_image(const OecImage *image) {
++float oec_rgb_to_gray(float r, float g, float b)
++{
++	return 0.299f * r + 0.587f * g + 0.114f * b;
++}
++
++OEC_TENSOR *oec_tensor_from_image_channels(const OecImage *image, int channels)
++{
+ 	if (image == NULL || image->data == NULL) {
+ 		return NULL;
+ 	}
+@@ -38,34 +44,55 @@
+ 		return NULL;
+ 	}
+ 	
+-	OEC_TENSOR *tensor = malloc(sizeof(*tensor));
++	if (channels != 1 && channels != 3) {
++		return NULL;
++	}
++	
++	OEC_TENSOR *tensor = oec_tensor_create(image->width, image->height, channels);
+ 	
+ 	if (tensor == NULL) {
+ 		return NULL;
+ 	}
+ 	
+-	tensor->w = image->width;
+-	tensor->h = image->height;
+-	tensor->c = image->channels;
+-	
+ 	size_t hw = (size_t)tensor->w * (size_t)tensor->h;
++	size_t stride = (size_t)image->channels;
+ 	
+-	tensor->data = malloc(hw * tensor->c * sizeof(float));
+-	
+-	if (tensor->data == NULL) {
+-		free(tensor);
+-		return NULL;
+-	}
++	// 1 (gray) or 2 (gray + alpha) channel sources are gray, 3+ are RGB(A).
++	int src_is_rgb = image->channels >= 3;
+ 	
+ 	for (size_t p = 0; p < hw; p++) {
+-		tensor->data[0 * hw + p] = image->data[p * image->channels + 0]; // R plane
+-		tensor->data[1 * hw + p] = image->data[p * image->channels + 1]; // G plane
+-		tensor->data[2 * hw + p] = image->data[p * image->channels + 2]; // B plane
++		const float *src = &image->data[p * stride];
++		
++		if (channels == 3) {
++			if (src_is_rgb) {
++				tensor->data[0 * hw + p] = src[0]; // R plane
++				tensor->data[1 * hw + p] = src[1]; // G plane
++				tensor->data[2 * hw + p] = src[2]; // B plane
++			} else {
++				tensor->data[0 * hw + p] = src[0];
++				tensor->data[1 * hw + p] = src[0];
++				tensor->data[2 * hw + p] = src[0];
++			}
++		} else {
++			if (src_is_rgb) {
++				tensor->data[p] = oec_rgb_to_gray(src[0], src[1], src[2]);
++			} else {
++				tensor->data[p] = src[0];
++			}
++		}
+ 	}
+ 	
+ 	return tensor;
+ }
+ 
++OEC_TENSOR *oec_tensor_from_image(const OecImage *image) {
++	if (image == NULL || image->data == NULL) {
++		return NULL;
++	}
++	
++	return oec_tensor_from_image_channels(image, image->channels >= 3 ? 3 : 1);
++}
++
+ void oec_tensor_free(OEC_TENSOR *tensor)
+ {
+ 	if (tensor == NULL) {
+diff -ruN --strip-trailing-cr a/examples/oec_finetune.c oec/examples/oec_finetune.c
+--- a/examples/oec_finetune.c	2026-10-18 03:37:18.516936995 +0000
++++ b/examples/oec_finetune.c	2026-10-18 03:39:19.132737438 +0000
+@@ -58,6 +58,7 @@
+ 	}
+ 	
+ 	printf("Model Total Layers: %d\n", model->count);
++	printf("Model input: %dx%dx%d (%s)\n", model->input->w, model->input->h, model->input->c, model->input->c == 1 ? "grayscale" : "RGB");
+ 	
+ 	OEC_TENSOR *last = model->outputs[model->count - 1];
+ 	
+diff -ruN --strip-trailing-cr a/examples/oec_predict.c oec/examples/oec_predict.c
+--- a/examples/oec_predict.c	2026-10-18 03:37:18.517053800 +0000
++++ b/examples/oec_predict.c	2026-10-18 03:39:19.133613829 +0000
+@@ -34,7 +34,13 @@
+ 		return EXIT_FAILURE;
+ 	}
+ 	
+-	input = oec_tensor_from_image(&image);
++	printf("Model input: %dx%dx%d (%s), image: %dx%dx%d\n",
++		model->input->w, model->input->h, model->input->c,
++		model->input->c == 1 ? "grayscale" : "RGB",
++		image.width, image.height, image.channels);
++	
++	// Convert the image to the channel count the model was trained with.
++	input = oec_tensor_from_image_channels(&image, model->input->c);
+ 	
+ 	if (input == NULL) {
+ 		fprintf(stderr, "Tensor error!\n");
+@@ -74,9 +80,20 @@
+ 	printf("w = %f\n", output.width);
+ 	printf("h = %f\n", output.height);
+ 	
++	// Drawing and saving work on RGB, so make an RGB view (gray input is replicated).
++	OecImage view;
++	
++	if (oec_image_to_rgb(&image, &view) != 0) {
++		fprintf(stderr, "Failed to create RGB view\n");
++		oec_image_free(&image);
++		oec_model_free(model);
++		oec_tensor_free(input);
++		return EXIT_FAILURE;
++	}
++	
+ 	// Draw box on that image with predicted information 
+ 	oec_image_draw_box(
+-		&image,
++		&view,
+ 		output.x,
+ 		output.y,
+ 		output.width,
+@@ -88,8 +105,9 @@
+ 	);
+ 	
+ 	// Save output visual image 
+-	if (oec_image_save_png2("prediction/predict_00003.png", &image) != 0) {
++	if (oec_image_save_png2("prediction/predict_00003.png", &view) != 0) {
+ 		fprintf(stderr, "Failed to save predict image\n");
++		oec_image_free(&view);
+ 		oec_image_free(&image);
+ 		oec_model_free(model);
+ 		return EXIT_FAILURE;
+@@ -98,6 +116,7 @@
+ 	printf("prediction image saved!\n");
+ 	
+ 	oec_tensor_free(input);
++	oec_image_free(&view);
+ 	oec_image_free(&image);
+ 	oec_model_free(model);
+ 	return EXIT_SUCCESS;
+diff -ruN --strip-trailing-cr a/examples/oec_train.c oec/examples/oec_train.c
+--- a/examples/oec_train.c	2026-10-18 03:37:18.517085458 +0000
++++ b/examples/oec_train.c	2026-10-18 03:39:19.132358921 +0000
+@@ -1,6 +1,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <math.h>
++#include <string.h>
+ 
+ #include "oec.h"
+ 
+@@ -9,16 +10,26 @@
+ 
+ #define OEC_INPUT_WIDTH  64
+ #define OEC_INPUT_HEIGHT 64
+-#define OEC_INPUT_CHANNEL 1
++
++/*
++ * Input channels are chosen at runtime:
++ *
++ *   oec_train          auto: grayscale if every dataset image is
++ *                      grayscale, otherwise RGB
++ *   oec_train gray     force a 1-channel model
++ *   oec_train rgb      force a 3-channel model
++ */
+ 
+ #define OUTPUT_BEST_MODEL_PATH "pretrained_best.oec"
+ #define OUTPUT_LAST_MODEL_PATH "pretrained_last.oec"
+ 
+-int main(void)
++int main(int argc, char **argv)
+ {
+ 	// For initialize random weight!
+ 	srand(1234);
+ 	
++	int in_channels = 0;
++	
+ 	OEC_DATASET *dataset = NULL;
+ 	OEC_MODEL *model = NULL;
+ 	OEC_LOSS *loss = NULL;
+@@ -44,6 +55,24 @@
+ 	
+ 	printf("Found %zd training samples\n", dataset->train.count);
+ 	
++	if (argc > 1 && strcmp(argv[1], "gray") == 0) {
++		in_channels = 1;
++	} else if (argc > 1 && strcmp(argv[1], "rgb") == 0) {
++		in_channels = 3;
++	} else if (argc > 1 && strcmp(argv[1], "auto") != 0) {
++		fprintf(stderr, "Usage: %s [auto|gray|rgb]\n", argv[0]);
++		goto oec_exit;
++	} else {
++		in_channels = oec_dataset_detect_channels(dataset);
++		
++		if (in_channels < 0) {
++			fprintf(stderr, "Couldn't read any dataset image\n");
++			goto oec_exit;
++		}
++	}
++	
++	printf("Input: %dx%dx%d (%s)\n", OEC_INPUT_WIDTH, OEC_INPUT_HEIGHT, in_channels, in_channels == 1 ? "grayscale" : "RGB");
++	
+ 	model = oec_model_create(9);
+ 	
+ 	if (model == NULL) {
+@@ -51,17 +80,8 @@
+ 		goto oec_exit;
+ 	}
+ 	
+-	/*
+-	RGB
+-	OEC_LAYER *conv1 = oec_layer_conv_create(3, 16, 3, 2);
+-	OEC_LAYER *conv2 = oec_layer_conv_create(16, 32, 3, 2);
+-	OEC_LAYER *conv3 = oec_layer_conv_create(32, 64, 3, 2);
+-	OEC_LAYER *conv4 = oec_layer_conv_create(64, 96, 3, 2);
+-	OEC_LAYER *conv5 = oec_layer_conv_create(96, 5, 1, 1);
+-	*/
+-	
+-	// Grayscale 
+-	OEC_LAYER *conv1 = oec_layer_conv_create(1,  16, 3, 2);
++	// First conv takes 1 (grayscale) or 3 (RGB) input channels.
++	OEC_LAYER *conv1 = oec_layer_conv_create(in_channels, 16, 3, 2);
+ 	OEC_LAYER *conv2 = oec_layer_conv_create(16, 32, 3, 2);
+ 	OEC_LAYER *conv3 = oec_layer_conv_create(32, 64, 3, 2);
+ 	OEC_LAYER *conv4 = oec_layer_conv_create(64, 96, 3, 2);
+@@ -82,7 +102,7 @@
+ 	oec_model_add_layer(model, act4);
+ 	oec_model_add_layer(model, conv5);
+ 	
+-	if (oec_model_build(model, OEC_INPUT_WIDTH, OEC_INPUT_HEIGHT, OEC_INPUT_CHANNEL) != 0) {
++	if (oec_model_build(model, OEC_INPUT_WIDTH, OEC_INPUT_HEIGHT, in_channels) != 0) {
+ 		fprintf(stderr, "Failed to build model\n");
+ 		goto oec_exit;
+ 	}
+@@ -115,7 +135,7 @@
+ 		goto oec_exit;
+ 	}
+ 	
+-	input = oec_tensor_create(OEC_INPUT_WIDTH, OEC_INPUT_HEIGHT, OEC_INPUT_CHANNEL);
++	input = oec_tensor_create(OEC_INPUT_WIDTH, OEC_INPUT_HEIGHT, in_channels);
+ 	
+ 	if (input == NULL) {
+ 		fprintf(stderr, "Failed to allocate input tensor\n");

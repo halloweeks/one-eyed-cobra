@@ -27,8 +27,8 @@
 // core
 #include "oec.h"
 
-#define EPOCHS 100
-#define LEARNING_RATE 0.0001f
+#define EPOCHS 60
+#define LEARNING_RATE 0.001f
 
 #define INPUT_MODEL_PATH "pretrained_best.oec"
 #define OUTPUT_BEST_MODEL_PATH "finetuned_best.oec"
@@ -58,6 +58,7 @@ int main(void)
 	}
 	
 	printf("Model Total Layers: %d\n", model->count);
+	printf("Model input: %dx%dx%d (%s)\n", model->input->w, model->input->h, model->input->c, model->input->c == 1 ? "grayscale" : "RGB");
 	
 	OEC_TENSOR *last = model->outputs[model->count - 1];
 	

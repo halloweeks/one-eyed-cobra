@@ -6,9 +6,22 @@
 !/include/
 !/include/**
 
+!/examples/
+!/examples/**
+
+!/prediction/
+!/prediction/**
+
+!/dataset/
+!/dataset/**
+
 !/CMakeLists.txt
 !/build.sh
 !/README.md
 !/LICENSE
 !/.gitignore
 !/.gitattributes
+!/oec-grayscale.patch
+
+# Allow pretrained model files in the root directory
+!/*.oec

@@ -48,9 +48,28 @@ typedef struct {
 OEC_DATASET *oec_dataset_open(const char *root);
 void oec_dataset_close(OEC_DATASET *dataset);
 
+/*
+ * Load an image into a preallocated 1 (gray) or 3 (RGB) channel tensor.
+ * The image is converted to the tensor's channel count and
+ * nearest-neighbor resized to the tensor's width/height.
+ */
 int oec_dataset_load_image(
     const char *path,
     OEC_TENSOR *image
+);
+
+/*
+ * Inspect the image headers of every split and report the channel
+ * count a model for this dataset should use:
+ *
+ *   1  - every image is grayscale
+ *   3  - at least one image is color (gray images are replicated)
+ *  -1  - no readable images
+ *
+ * Only headers are read, images are not decoded.
+ */
+int oec_dataset_detect_channels(
+    const OEC_DATASET *dataset
 );
 
 OEC_SAMPLE_DATA oec_dataset_load_label(

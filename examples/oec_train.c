@@ -1,24 +1,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
 
 #include "oec.h"
 
-#define EPOCHS 100
+#define EPOCHS 200
 #define LEARNING_RATE 0.001f
 
-// x = (64 * 64 * 3) x = 12,288
 #define OEC_INPUT_WIDTH  64
 #define OEC_INPUT_HEIGHT 64
-#define OEC_INPUT_CHANNEL 3
+
+/*
+ * Input channels are chosen at runtime:
+ *
+ *   oec_train          auto: grayscale if every dataset image is
+ *                      grayscale, otherwise RGB
+ *   oec_train gray     force a 1-channel model
+ *   oec_train rgb      force a 3-channel model
+ */
 
 #define OUTPUT_BEST_MODEL_PATH "pretrained_best.oec"
 #define OUTPUT_LAST_MODEL_PATH "pretrained_last.oec"
 
-int main(void)
+int main(int argc, char **argv)
 {
 	// For initialize random weight!
 	srand(1234);
+	
+	int in_channels = 0;
 	
 	OEC_DATASET *dataset = NULL;
 	OEC_MODEL *model = NULL;
@@ -45,6 +55,24 @@ int main(void)
 	
 	printf("Found %zd training samples\n", dataset->train.count);
 	
+	if (argc > 1 && strcmp(argv[1], "gray") == 0) {
+		in_channels = 1;
+	} else if (argc > 1 && strcmp(argv[1], "rgb") == 0) {
+		in_channels = 3;
+	} else if (argc > 1 && strcmp(argv[1], "auto") != 0) {
+		fprintf(stderr, "Usage: %s [auto|gray|rgb]\n", argv[0]);
+		goto oec_exit;
+	} else {
+		in_channels = oec_dataset_detect_channels(dataset);
+		
+		if (in_channels < 0) {
+			fprintf(stderr, "Couldn't read any dataset image\n");
+			goto oec_exit;
+		}
+	}
+	
+	printf("Input: %dx%dx%d (%s)\n", OEC_INPUT_WIDTH, OEC_INPUT_HEIGHT, in_channels, in_channels == 1 ? "grayscale" : "RGB");
+	
 	model = oec_model_create(9);
 	
 	if (model == NULL) {
@@ -52,12 +80,13 @@ int main(void)
 		goto oec_exit;
 	}
 	
-	OEC_LAYER *conv1 = oec_layer_conv_create(3, 16, 3, 2);
+	// First conv takes 1 (grayscale) or 3 (RGB) input channels.
+	OEC_LAYER *conv1 = oec_layer_conv_create(in_channels, 16, 3, 2);
 	OEC_LAYER *conv2 = oec_layer_conv_create(16, 32, 3, 2);
 	OEC_LAYER *conv3 = oec_layer_conv_create(32, 64, 3, 2);
 	OEC_LAYER *conv4 = oec_layer_conv_create(64, 96, 3, 2);
-	OEC_LAYER *conv5 = oec_layer_conv_create(96, 5, 1, 1);
-	
+	OEC_LAYER *conv5 = oec_layer_conv_create(96, 5,  1, 1);
+
 	OEC_LAYER *act1  = oec_layer_activation_create(OEC_ACTIVATION_RELU);
 	OEC_LAYER *act2  = oec_layer_activation_create(OEC_ACTIVATION_RELU);
 	OEC_LAYER *act3  = oec_layer_activation_create(OEC_ACTIVATION_RELU);
@@ -73,7 +102,7 @@ int main(void)
 	oec_model_add_layer(model, act4);
 	oec_model_add_layer(model, conv5);
 	
-	if (oec_model_build(model, OEC_INPUT_WIDTH, OEC_INPUT_HEIGHT, OEC_INPUT_CHANNEL) != 0) {
+	if (oec_model_build(model, OEC_INPUT_WIDTH, OEC_INPUT_HEIGHT, in_channels) != 0) {
 		fprintf(stderr, "Failed to build model\n");
 		goto oec_exit;
 	}
@@ -106,7 +135,7 @@ int main(void)
 		goto oec_exit;
 	}
 	
-	input = oec_tensor_create(OEC_INPUT_WIDTH, OEC_INPUT_HEIGHT, OEC_INPUT_CHANNEL);
+	input = oec_tensor_create(OEC_INPUT_WIDTH, OEC_INPUT_HEIGHT, in_channels);
 	
 	if (input == NULL) {
 		fprintf(stderr, "Failed to allocate input tensor\n");
@@ -156,13 +185,16 @@ int main(void)
 			float sample_loss = oec_loss_forward(loss, output, &target);
 			total_loss += sample_loss;
 			
+			// Calculate gradients.
 			if (oec_loss_backward(loss, output, &target, grad) != 0) {
 				fprintf(stderr, "Loss backward failed\n");
 				goto oec_exit;
 			}
 			
+			// Backpropagation.
 			oec_model_backward(model, grad, grad_input);
 			
+			// Update parameters.
 			oec_optimizer_step(optimizer, model);
 		}
 		

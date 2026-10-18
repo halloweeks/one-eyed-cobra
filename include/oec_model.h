@@ -5,7 +5,21 @@
 #include "oec_layer.h"
 
 #define OEC_MODEL_MAGIC "OECM"
-#define OEC_MODEL_VERSION 1
+
+/*
+ * File format versions:
+ *   1 - magic, version, layer_count, layers
+ *   2 - magic, version, layer_count, input_w, input_h, input_c, layers
+ *
+ * Version 1 files do not store the input shape. They are loaded with
+ * the channel count of the first conv layer and the legacy size below.
+ */
+#define OEC_MODEL_VERSION 2
+
+#define OEC_MODEL_LEGACY_INPUT_W 64
+#define OEC_MODEL_LEGACY_INPUT_H 64
+
+#define OEC_MODEL_MAX_INPUT_DIM 16384
 
 typedef struct {
     uint32_t type;

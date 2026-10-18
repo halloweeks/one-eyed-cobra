@@ -26,7 +26,9 @@ int oec_dataset_load_image(const char *path, OEC_TENSOR *image)
 		return -1;
 	}
 	
-	if (image->c != 3) {
+	// Supported model inputs: grayscale (1) or RGB (3).
+	if (image->c != 1 && image->c != 3) {
+		fprintf(stderr, "Unsupported tensor channel count: %d (expected 1 or 3)\n", image->c);
 		return -1;
 	}
 	
@@ -34,16 +36,26 @@ int oec_dataset_load_image(const char *path, OEC_TENSOR *image)
 	int src_h;
 	int src_c;
 	
-	unsigned char *src = stbi_load(path, &src_w, &src_h, &src_c, 3);
+	// Load with the file's native channel count.
+	unsigned char *src = stbi_load(path, &src_w, &src_h, &src_c, 0);
 	
 	if (src == NULL) {
+		fprintf(stderr, "Failed to load image: %s\n", path);
 		return -1;
 	}
+	
+	// 1 / 2 channels are gray (+ alpha), 3 / 4 are RGB (+ alpha).
+	int src_is_rgb = src_c >= 3;
 	
 	/*
 	 * Simple nearest-neighbor resize
 	 * and HWC uint8 -> CHW float conversion.
+	 *
+	 * Color is converted to the tensor's channel count here, using
+	 * the same math as oec_tensor_from_image_channels() so training
+	 * and inference see identical pixels.
 	 */
+	size_t plane = (size_t)image->h * (size_t)image->w;
 	
 	for (int y = 0; y < image->h; y++) {
 		int sy = (y * src_h) / image->h;
@@ -51,25 +63,28 @@ int oec_dataset_load_image(const char *path, OEC_TENSOR *image)
 		for (int x = 0; x < image->w; x++) {
 			int sx = (x * src_w) / image->w;
 			
-			size_t src_index = ((size_t)sy * (size_t)src_w + (size_t)sx) * 3;
-			
-			float r = src[src_index + 0] / 255.0f;
-			float g = src[src_index + 1] / 255.0f;
-			float b = src[src_index + 2] / 255.0f;
-			
+			size_t src_index = ((size_t)sy * (size_t)src_w + (size_t)sx) * (size_t)src_c;
 			size_t pixel = (size_t)y * (size_t)image->w + (size_t)x;
 			
-			image->data[
-				(size_t)0 * image->h * image->w + pixel
-			] = r;
-			
-			image->data[
-				(size_t)1 * image->h * image->w + pixel
-			] = g;
-			
-			image->data[
-				(size_t)2 * image->h * image->w + pixel
-			] = b;
+			if (src_is_rgb) {
+				float r = src[src_index + 0] / 255.0f;
+				float g = src[src_index + 1] / 255.0f;
+				float b = src[src_index + 2] / 255.0f;
+				
+				if (image->c == 3) {
+					image->data[0 * plane + pixel] = r;
+					image->data[1 * plane + pixel] = g;
+					image->data[2 * plane + pixel] = b;
+				} else {
+					image->data[pixel] = oec_rgb_to_gray(r, g, b);
+				}
+			} else {
+				float v = src[src_index] / 255.0f;
+				
+				for (int c = 0; c < image->c; c++) {
+					image->data[(size_t)c * plane + pixel] = v;
+				}
+			}
 		}
 	}
 	
@@ -452,6 +467,48 @@ fail:
     free(dataset);
 
     return NULL;
+}
+
+/*
+ * Returns 1 if every image in the split is grayscale, 0 if at least
+ * one is color, -1 if no image header could be read at all.
+ */
+static int split_is_gray(const OEC_DATASET_SPLIT *split, int *readable)
+{
+	for (size_t i = 0; i < split->count; i++) {
+		int w;
+		int h;
+		int c;
+		
+		if (!stbi_info(split->samples[i].image_path, &w, &h, &c)) {
+			continue;
+		}
+		
+		*readable = 1;
+		
+		if (c >= 3) {
+			return 0;
+		}
+	}
+	
+	return 1;
+}
+
+int oec_dataset_detect_channels(const OEC_DATASET *dataset)
+{
+	if (dataset == NULL) {
+		return -1;
+	}
+	
+	int readable = 0;
+	
+	if (!split_is_gray(&dataset->train, &readable) ||
+	    !split_is_gray(&dataset->valid, &readable) ||
+	    !split_is_gray(&dataset->test,  &readable)) {
+		return 3;
+	}
+	
+	return readable ? 1 : -1;
 }
 
 void oec_dataset_close(OEC_DATASET *dataset)

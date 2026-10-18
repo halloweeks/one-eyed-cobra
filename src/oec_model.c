@@ -45,6 +45,12 @@ int oec_model_save(const OEC_MODEL *model, const char *path)
 		return -1;
 	}
 	
+	// The input shape is stored in the file, so the model must be built.
+	if (model->input == NULL) {
+		fprintf(stderr, "save: model has not been built (unknown input shape)\n");
+		return -1;
+	}
+	
 	FILE *fp = fopen(path, "wb");
 	
 	if (fp == NULL) {
@@ -52,12 +58,19 @@ int oec_model_save(const OEC_MODEL *model, const char *path)
 	}
 	
 	const char magic[4] = { 'O', 'E', 'C', 'M' };
-	uint32_t version = 1;
+	uint32_t version = OEC_MODEL_VERSION;
 	uint32_t layer_count = (uint32_t)model->count;
+	
+	uint32_t input_w = (uint32_t)model->input->w;
+	uint32_t input_h = (uint32_t)model->input->h;
+	uint32_t input_c = (uint32_t)model->input->c;
 	
 	if (fwrite(magic, sizeof(magic), 1, fp) != 1 ||
         fwrite(&version, sizeof(version), 1, fp) != 1 ||
-        fwrite(&layer_count, sizeof(layer_count), 1, fp) != 1)
+        fwrite(&layer_count, sizeof(layer_count), 1, fp) != 1 ||
+        fwrite(&input_w, sizeof(input_w), 1, fp) != 1 ||
+        fwrite(&input_h, sizeof(input_h), 1, fp) != 1 ||
+        fwrite(&input_c, sizeof(input_c), 1, fp) != 1)
     {
         fclose(fp);
         return -1;
@@ -216,21 +229,18 @@ OEC_MODEL *oec_model_load(const char *path)
 		return NULL;
 	}
 	
+	FILE *fp = fopen(path, "rb");
 	
-
-    FILE *fp = fopen(path, "rb");
-
-    if (fp == NULL)
-        return NULL;
-
-    char magic[4];
-    uint32_t version;
-    uint32_t layer_count;
-
-    /*
-     * Read header.
-     */
-    if (fread(magic, sizeof(magic), 1, fp) != 1 ||
+	if (fp == NULL) {
+		return NULL;
+	}
+	
+	char magic[4];
+	uint32_t version;
+	uint32_t layer_count;
+	
+	// Read header.
+	if (fread(magic, sizeof(magic), 1, fp) != 1 ||
         fread(&version, sizeof(version), 1, fp) != 1 ||
         fread(&layer_count, sizeof(layer_count), 1, fp) != 1)
     {
@@ -252,7 +262,7 @@ OEC_MODEL *oec_model_load(const char *path)
         return NULL;
     }
 
-    if (version != 1)
+    if (version != 1 && version != OEC_MODEL_VERSION)
     {
     	printf("Unsupported version \n");
         fclose(fp);
@@ -267,6 +277,37 @@ OEC_MODEL *oec_model_load(const char *path)
         return NULL;
     }
 
+    /*
+     * Input shape (version 2+). Version 1 files don't store it;
+     * it is resolved after the layers are read.
+     */
+    uint32_t input_w = OEC_MODEL_LEGACY_INPUT_W;
+    uint32_t input_h = OEC_MODEL_LEGACY_INPUT_H;
+    uint32_t input_c = 0;
+
+    if (version >= 2)
+    {
+        if (fread(&input_w, sizeof(input_w), 1, fp) != 1 ||
+            fread(&input_h, sizeof(input_h), 1, fp) != 1 ||
+            fread(&input_c, sizeof(input_c), 1, fp) != 1)
+        {
+            fprintf(stderr, "load: truncated header\n");
+            fclose(fp);
+            return NULL;
+        }
+
+        if (input_w == 0 || input_w > OEC_MODEL_MAX_INPUT_DIM ||
+            input_h == 0 || input_h > OEC_MODEL_MAX_INPUT_DIM ||
+            input_c == 0 || input_c > 4)
+        {
+            fprintf(stderr,
+                    "load: invalid input shape %ux%ux%u\n",
+                    input_w, input_h, input_c);
+            fclose(fp);
+            return NULL;
+        }
+    }
+
     OEC_MODEL *model =
         oec_model_create((int)layer_count);
 
@@ -276,6 +317,9 @@ OEC_MODEL *oec_model_load(const char *path)
         fclose(fp);
         return NULL;
     }
+
+    /* in_channels of the first conv layer, used to check / infer input_c */
+    int first_conv_in = 0;
 
     /*
      * Read layers.
@@ -321,6 +365,9 @@ OEC_MODEL *oec_model_load(const char *path)
             	//printf("Failed hola\n");
                 goto fail;
             }
+
+            if (first_conv_in == 0)
+                first_conv_in = (int)in_channels;
 
             layer =
                 oec_layer_conv_create(
@@ -446,9 +493,31 @@ OEC_MODEL *oec_model_load(const char *path)
      * Recreate runtime tensors.
      *
      * The model file contains architecture + parameters,
-     * but runtime input/output/gradient tensors are rebuilt.
+     * but runtime input/output/gradient tensors are rebuilt
+     * from the stored input shape.
      */
-    if (oec_model_build(model, 64, 64, 3) != 0)
+    if (first_conv_in == 0)
+    {
+        fprintf(stderr, "load: model has no conv layer\n");
+        oec_model_free(model);
+        return NULL;
+    }
+
+    if (version < 2)
+    {
+        // Legacy file: channels come from the first conv layer.
+        input_c = (uint32_t)first_conv_in;
+    }
+    else if ((int)input_c != first_conv_in)
+    {
+        fprintf(stderr,
+                "load: input channels (%u) do not match the first conv layer (%d)\n",
+                input_c, first_conv_in);
+        oec_model_free(model);
+        return NULL;
+    }
+
+    if (oec_model_build(model, (int)input_w, (int)input_h, (int)input_c) != 0)
     {
     	// printf("failed to build loaded model\n");
         oec_model_free(model);
@@ -575,18 +644,16 @@ static int layer_output_size(
 int oec_model_build(OEC_MODEL *model, int input_w, int input_h, int input_c)
 {
 	if (model == NULL) {
-		printf("model == NULL\n");
+		fprintf(stderr, "model == NULL\n");
 		return -1;
 	}
 	
 	if (input_w <= 0 || input_h <= 0 || input_c <= 0) {
-		printf("input_w <= 0 || input_h <= 0 || input_c <= 0\n");
+		fprintf(stderr, "input_w <= 0 || input_h <= 0 || input_c <= 0\n");
 		return -1;
 	}
 	
-	/*
-	 * Free an existing build.
-	 */
+	// Free an existing build.
 	for (int i = 0; i < model->count; i++) {
 		oec_tensor_free(model->outputs[i]);
 		oec_tensor_free(model->grads[i]);
@@ -598,9 +665,7 @@ int oec_model_build(OEC_MODEL *model, int input_w, int input_h, int input_c)
 	oec_tensor_free(model->input);
 	model->input = NULL;
 	
-	/*
-	 * Store model input.
-	 */
+	// Store model input.
 	model->input = oec_tensor_create(input_w, input_h, input_c);
 	
 	if (model->input == NULL) {
@@ -650,23 +715,25 @@ int oec_model_forward(OEC_MODEL *model, const OEC_TENSOR *input, OEC_TENSOR *out
      * Copy input into model-owned
      * activation storage.
      */
+    if (model->input == NULL) {
+        fprintf(stderr, "forward: model has not been built\n");
+        return -1;
+    }
+
+    if (input->w != model->input->w ||
+        input->h != model->input->h ||
+        input->c != model->input->c) {
+        fprintf(stderr,
+            "input shape mismatch: got %dx%dx%d, model expects %dx%dx%d\n",
+            input->w, input->h, input->c,
+            model->input->w, model->input->h, model->input->c);
+        return -1;
+    }
+
     size_t count =
         (size_t)input->w *
         (size_t)input->h *
         (size_t)input->c;
-
-    size_t expected =
-        (size_t)model->input->w *
-        (size_t)model->input->h *
-        (size_t)model->input->c;
-
-    if (count != expected) {
-    	fprintf(stderr,
-            "count mismatch: count=%zu expected=%zu\n",
-            count,
-            expected);
-        return -1;
-       }
 
     for (size_t i = 0; i < count; i++)
         model->input->data[i] = input->data[i];
@@ -822,6 +889,7 @@ void oec_model_sgd_step(
 	
 }
 
+// Predict function 
 int oec_model_predict(OEC_MODEL *model, const OEC_TENSOR *input, OEC_PREDICTION *prediction)
 {
 	if (model == NULL) {

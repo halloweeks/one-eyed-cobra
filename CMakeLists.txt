@@ -37,12 +37,18 @@ add_executable(oec_finetune
     examples/oec_finetune.c
 )
 
+add_executable(oec_img
+    examples/oec_img.c
+)
+
 
 target_link_libraries(oec_train oec m)
 
 target_link_libraries(oec_finetune oec m)
 
 target_link_libraries(oec_predict oec m)
+
+target_link_libraries(oec_img oec m)
 
 if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(
@@ -71,4 +77,15 @@ if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
             -Wpedantic
             -march=native
     )
+    
+    target_compile_options(
+        oec_img
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            -march=native
+    )
+    
+    
 endif()

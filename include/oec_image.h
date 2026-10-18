@@ -120,6 +120,19 @@ int oec_image_grayscale(
     OecImage *image
 );
 
+/*
+ * Create a 3-channel RGB copy of an image with any channel count.
+ * Gray (1) and gray+alpha (2) images are replicated into R, G and B,
+ * RGB (3) and RGBA (4) images drop alpha.
+ *
+ * Handy for drawing colored boxes on grayscale input.
+ * The result must be released with oec_image_free().
+ */
+int oec_image_to_rgb(
+    const OecImage *source,
+    OecImage *destination
+);
+
 int oec_image_invert(
     OecImage *image
 );
@@ -262,6 +275,11 @@ static const uint8_t dragonfly_font_5x7[128][7] = {
 int oec_image_save_png(
     const char *filename,
     const OecImage *image
+);
+
+int oec_image_save_png2(
+	const char *filename,
+	const OecImage *image
 );
 
 int oec_image_save_bmp(
