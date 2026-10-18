@@ -40,6 +40,9 @@ int main(int argc, char **argv)
 	OEC_TENSOR *grad = NULL;
 	OEC_TENSOR *grad_input = NULL;
 	
+	// Cell -> target map, only used for the first-epoch collision report.
+	int *cell_target = NULL;
+	
 	
 	dataset = oec_dataset_open("dataset");
 	
@@ -163,17 +166,42 @@ int main(int argc, char **argv)
 		goto oec_exit;
 	}
 	
+	cell_target = malloc((size_t)last->w * (size_t)last->h * sizeof(int));
+	
+	if (cell_target == NULL) {
+		fprintf(stderr, "Failed to allocate cell map\n");
+		goto oec_exit;
+	}
+	
 	float best_loss = INFINITY;
 	
 	for (int epoch = 0; epoch < EPOCHS; epoch++) {
 		float total_loss = 0.0f;
+		
+		// Box statistics (first epoch only).
+		long box_total = 0;
+		long box_moved = 0;
+		long box_dropped = 0;
 		
 		for (size_t i = 0; i < dataset->train.count; i++) {
 			OEC_SAMPLE *sample = &dataset->train.samples[i];
 			
 			OEC_SAMPLE_DATA data = oec_dataset_load_sample(sample, input);
 			
-			OEC_TARGET target = select_target(&data);
+			// Every labeled box becomes a training target.
+			OEC_TARGETS targets = select_targets(&data);
+			
+			if (epoch == 0) {
+				int moved = 0;
+				int dropped = oec_target_assign(&targets, last->w, last->h, cell_target, &moved);
+				
+				box_total += targets.count;
+				box_moved += moved;
+				
+				if (dropped > 0) {
+					box_dropped += dropped;
+				}
+			}
 			
 			oec_optimizer_zero_grad(model);
 			
@@ -182,11 +210,11 @@ int main(int argc, char **argv)
 				goto oec_exit;
 			}
 			
-			float sample_loss = oec_loss_forward(loss, output, &target);
+			float sample_loss = oec_loss_forward_multi(loss, output, &targets);
 			total_loss += sample_loss;
 			
 			// Calculate gradients.
-			if (oec_loss_backward(loss, output, &target, grad) != 0) {
+			if (oec_loss_backward_multi(loss, output, &targets, grad) != 0) {
 				fprintf(stderr, "Loss backward failed\n");
 				goto oec_exit;
 			}
@@ -196,6 +224,20 @@ int main(int argc, char **argv)
 			
 			// Update parameters.
 			oec_optimizer_step(optimizer, model);
+		}
+		
+		if (epoch == 0) {
+			printf(
+				"Targets: %ld boxes in %zu images (%ld moved to a neighbor cell, %ld dropped)\n",
+				box_total,
+				dataset->train.count,
+				box_moved,
+				box_dropped
+			);
+			
+			if (box_dropped > 0) {
+				fprintf(stderr, "Warning: %ld boxes don't fit in the %dx%d output grid and are not trained on\n", box_dropped, last->w, last->h);
+			}
 		}
 		
 		printf(
@@ -235,5 +277,6 @@ int main(int argc, char **argv)
 		oec_tensor_free(output);
 		oec_tensor_free(grad);
 		oec_tensor_free(grad_input);
+		free(cell_target);
     return 0;
 }

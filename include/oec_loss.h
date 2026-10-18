@@ -48,4 +48,25 @@ int oec_loss_backward(
 	OEC_TENSOR *grad
 );
 
+/*
+ * Multi-object versions. Targets are assigned to cells with
+ * oec_target_assign(); every assigned cell is positive and all other cells
+ * are negative. Positive and negative terms are averaged separately,
+ * as in the single-target loss, so with exactly one target the result is
+ * identical to oec_loss_forward / oec_loss_backward. With no targets
+ * (empty image) every cell is a negative.
+ */
+float oec_loss_forward_multi(
+	const OEC_LOSS *loss,
+	const OEC_TENSOR *prediction,
+	const OEC_TARGETS *targets
+);
+
+int oec_loss_backward_multi(
+	const OEC_LOSS *loss,
+	const OEC_TENSOR *prediction,
+	const OEC_TARGETS *targets,
+	OEC_TENSOR *grad
+);
+
 #endif

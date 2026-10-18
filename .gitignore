@@ -15,6 +15,9 @@
 !/dataset/
 !/dataset/**
 
+!/test/
+!/test/**
+
 !/CMakeLists.txt
 !/build.sh
 !/README.md

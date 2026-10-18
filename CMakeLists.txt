@@ -41,6 +41,10 @@ add_executable(oec_img
     examples/oec_img.c
 )
 
+add_executable(oec_test_multi
+    tests/oec_test_multi.c
+)
+
 
 target_link_libraries(oec_train oec m)
 
@@ -49,6 +53,8 @@ target_link_libraries(oec_finetune oec m)
 target_link_libraries(oec_predict oec m)
 
 target_link_libraries(oec_img oec m)
+
+target_link_libraries(oec_test_multi oec m)
 
 if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(

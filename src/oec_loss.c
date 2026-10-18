@@ -31,34 +31,59 @@ void oec_loss_free(OEC_LOSS *loss)
 	free(loss);
 }
 
-static int oec_loss_assign_cell(
-	const OEC_TARGET *target,
+/*
+ * Assign targets to cells. cell_target[cell] = target index or -1.
+ * Returns the number of positive (assigned) cells, or -1 on failure.
+ * The caller frees *cell_target_out.
+ */
+static int oec_loss_assign(
+	const OEC_TARGETS *targets,
 	int grid_w,
 	int grid_h,
-	int *col,
-	int *row)
+	int **cell_target_out)
 {
-	if (target->confidence <= 0.0f)
+	size_t plane = (size_t)grid_w * (size_t)grid_h;
+	
+	int *cell_target = malloc(plane * sizeof(int));
+	
+	if (cell_target == NULL) {
 		return -1;
+	}
 	
-	int c = (int)(target->x * (float)grid_w);
-	int r = (int)(target->y * (float)grid_h);
+	// Targets that don't fit (more targets than cells) are simply left out.
+	if (oec_target_assign(targets, grid_w, grid_h, cell_target, NULL) < 0) {
+		free(cell_target);
+		return -1;
+	}
 	
-	if (c < 0) c = 0;
-	if (c >= grid_w) c = grid_w - 1;
+	int positives = 0;
 	
-	if (r < 0) r = 0;
-	if (r >= grid_h) r = grid_h - 1;
+	for (size_t i = 0; i < plane; i++) {
+		if (cell_target[i] >= 0) {
+			positives++;
+		}
+	}
 	
-	*col = c;
-	*row = r;
+	*cell_target_out = cell_target;
 	
-	return 0;
+	return positives;
 }
 
-float oec_loss_forward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const OEC_TARGET *target)
+static OEC_TARGETS oec_loss_single_to_multi(const OEC_TARGET *target)
 {
-	if (loss == NULL || prediction == NULL || target == NULL) {
+	OEC_TARGETS targets = {0};
+	
+	if (target->confidence > 0.0f) {
+		targets.targets[0] = *target;
+		targets.count = 1;
+	}
+	
+	return targets;
+}
+
+float oec_loss_forward_multi(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const OEC_TARGETS *targets)
+{
+	if (loss == NULL || prediction == NULL || targets == NULL) {
 		return -1.0f;
 	}
 	
@@ -69,17 +94,18 @@ float oec_loss_forward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const
 	int grid_w = prediction->w;
 	int grid_h = prediction->h;
 	
-	int assigned_col = -1;
-	int assigned_row = -1;
+	int *cell_target = NULL;
+	int positives = oec_loss_assign(targets, grid_w, grid_h, &cell_target);
 	
-	int has_object =
-		(oec_loss_assign_cell(target, grid_w, grid_h, &assigned_col, &assigned_row) == 0);
+	if (positives < 0) {
+		return -1.0f;
+	}
 	
 	size_t plane = (size_t)grid_w * (size_t)grid_h;
 	
 	float positive_loss_sum = 0.0f;
 	float negative_loss_sum = 0.0f;
-	float box_loss = 0.0f;
+	float box_loss_sum = 0.0f;
 	
 	for (int row = 0; row < grid_h; row++) {
 		for (int col = 0; col < grid_w; col++) {
@@ -88,8 +114,8 @@ float oec_loss_forward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const
 			
 			float confidence_logit = prediction->data[0 * plane + idx];
 			
-			int is_positive =
-				has_object && row == assigned_row && col == assigned_col;
+			int target_index = cell_target[idx];
+			int is_positive = target_index >= 0;
 			
 			float confidence_target = is_positive ? 1.0f : 0.0f;
 			
@@ -99,11 +125,15 @@ float oec_loss_forward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const
 				log1pf(expf(-fabsf(confidence_logit)));
 			
 			if (is_positive) {
+				const OEC_TARGET *target = &targets->targets[target_index];
+				
 				positive_loss_sum += cell_bce;
 				
 				float cell_w = 1.0f / (float)grid_w;
 				float cell_h = 1.0f / (float)grid_h;
 				
+				// Offset inside the cell. It leaves [0, 1) when the
+				// object was moved to a neighboring cell.
 				float target_x = target->x / cell_w - (float)col;
 				float target_y = target->y / cell_h - (float)row;
 				
@@ -117,21 +147,24 @@ float oec_loss_forward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const
 				float dw = w - target->w;
 				float dh = h - target->h;
 				
-				box_loss = 0.25f * (dx * dx + dy * dy + dw * dw + dh * dh);
+				box_loss_sum += 0.25f * (dx * dx + dy * dy + dw * dw + dh * dh);
 			} else {
 				negative_loss_sum += cell_bce;
 			}
 		}
 	}
 	
+	free(cell_target);
+	
 	/* Positive cell(s) and negative cells contribute separately,
-	 * each weighted and averaged over their own count, so the lone
-	 * positive cell's signal isn't diluted by the 1000+ negatives. */
-	float positive_count = has_object ? 1.0f : 0.0f;
+	 * each weighted and averaged over their own count, so a few
+	 * positive cells' signal isn't diluted by the many negatives. */
+	float positive_count = (float)positives;
 	float negative_count = (float)plane - positive_count;
 	
 	float positive_loss = positive_count > 0.0f ? positive_loss_sum / positive_count : 0.0f;
 	float negative_loss = negative_count > 0.0f ? negative_loss_sum / negative_count : 0.0f;
+	float box_loss      = positive_count > 0.0f ? box_loss_sum / positive_count : 0.0f;
 	
 	float confidence_loss =
 		loss->object_weight * positive_loss +
@@ -140,9 +173,9 @@ float oec_loss_forward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const
 	return confidence_loss + loss->box_weight * box_loss;
 }
 
-int oec_loss_backward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const OEC_TARGET *target, OEC_TENSOR *grad)
+int oec_loss_backward_multi(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const OEC_TARGETS *targets, OEC_TENSOR *grad)
 {
-	if (loss == NULL || prediction == NULL || target == NULL || grad == NULL) {
+	if (loss == NULL || prediction == NULL || targets == NULL || grad == NULL) {
 		return -1;
 	}
 	
@@ -157,11 +190,12 @@ int oec_loss_backward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const 
 	int grid_w = prediction->w;
 	int grid_h = prediction->h;
 	
-	int assigned_col = -1;
-	int assigned_row = -1;
+	int *cell_target = NULL;
+	int positives = oec_loss_assign(targets, grid_w, grid_h, &cell_target);
 	
-	int has_object =
-		(oec_loss_assign_cell(target, grid_w, grid_h, &assigned_col, &assigned_row) == 0);
+	if (positives < 0) {
+		return -1;
+	}
 	
 	size_t plane = (size_t)grid_w * (size_t)grid_h;
 	size_t total = plane * 5;
@@ -169,7 +203,7 @@ int oec_loss_backward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const 
 	for (size_t i = 0; i < total; i++)
 		grad->data[i] = 0.0f;
 	
-	float positive_count = has_object ? 1.0f : 0.0f;
+	float positive_count = (float)positives;
 	float negative_count = (float)plane - positive_count;
 	
 	for (int row = 0; row < grid_h; row++) {
@@ -179,8 +213,8 @@ int oec_loss_backward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const 
 			
 			float confidence_logit = prediction->data[0 * plane + idx];
 			
-			int is_positive =
-				has_object && row == assigned_row && col == assigned_col;
+			int target_index = cell_target[idx];
+			int is_positive = target_index >= 0;
 			
 			float confidence_target = is_positive ? 1.0f : 0.0f;
 			
@@ -193,6 +227,7 @@ int oec_loss_backward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const 
 			grad->data[0 * plane + idx] = weight * (confidence - confidence_target);
 			
 			if (is_positive) {
+				const OEC_TARGET *target = &targets->targets[target_index];
 				
 				float cell_w = 1.0f / (float)grid_w;
 				float cell_h = 1.0f / (float)grid_h;
@@ -205,15 +240,43 @@ int oec_loss_backward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const 
 				float dw = prediction->data[3 * plane + idx] - target->w;
 				float dh = prediction->data[4 * plane + idx] - target->h;
 				
-				grad->data[1 * plane + idx] = loss->box_weight * 0.5f * dx;
-				grad->data[2 * plane + idx] = loss->box_weight * 0.5f * dy;
-				grad->data[3 * plane + idx] = loss->box_weight * 0.5f * dw;
-				grad->data[4 * plane + idx] = loss->box_weight * 0.5f * dh;
+				// Box loss is averaged over positive cells.
+				float box_scale = loss->box_weight * 0.5f / positive_count;
+				
+				grad->data[1 * plane + idx] = box_scale * dx;
+				grad->data[2 * plane + idx] = box_scale * dy;
+				grad->data[3 * plane + idx] = box_scale * dw;
+				grad->data[4 * plane + idx] = box_scale * dh;
 			}
 		}
 	}
 	
+	free(cell_target);
+	
 	return 0;
+}
+
+/* Single-target API, kept for compatibility. */
+float oec_loss_forward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const OEC_TARGET *target)
+{
+	if (target == NULL) {
+		return -1.0f;
+	}
+	
+	OEC_TARGETS targets = oec_loss_single_to_multi(target);
+	
+	return oec_loss_forward_multi(loss, prediction, &targets);
+}
+
+int oec_loss_backward(const OEC_LOSS *loss, const OEC_TENSOR *prediction, const OEC_TARGET *target, OEC_TENSOR *grad)
+{
+	if (target == NULL) {
+		return -1;
+	}
+	
+	OEC_TARGETS targets = oec_loss_single_to_multi(target);
+	
+	return oec_loss_backward_multi(loss, prediction, &targets, grad);
 }
 
 /*

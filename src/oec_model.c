@@ -889,6 +889,75 @@ void oec_model_sgd_step(
 	
 }
 
+/*
+ * Decode one grid cell of a 5-channel output tensor into a box.
+ *
+ * Invert the cell-relative parameterization used during training (see
+ * oec_loss_forward_multi): x/y are stored as an offset within the
+ * responsible cell, not full-image coordinates.
+ */
+static void decode_cell(const OEC_TENSOR *output, size_t idx, OEC_PREDICTION *prediction)
+{
+	int grid_w = output->w;
+	int grid_h = output->h;
+	size_t plane = (size_t)grid_w * (size_t)grid_h;
+	
+	int row = (int)(idx / (size_t)grid_w);
+	int col = (int)(idx % (size_t)grid_w);
+	
+	float confidence_logit = output->data[0 * plane + idx];
+	float x_offset = output->data[1 * plane + idx];
+	float y_offset = output->data[2 * plane + idx];
+	
+	float cell_w = 1.0f / (float)grid_w;
+	float cell_h = 1.0f / (float)grid_h;
+	
+	prediction->confidence = 1.0f / (1.0f + expf(-confidence_logit));
+	prediction->x = ((float)col + x_offset) * cell_w;
+	prediction->y = ((float)row + y_offset) * cell_h;
+	prediction->width  = output->data[3 * plane + idx];
+	prediction->height = output->data[4 * plane + idx];
+}
+
+static float prediction_iou(const OEC_PREDICTION *a, const OEC_PREDICTION *b)
+{
+	float ax0 = a->x - a->width  * 0.5f;
+	float ax1 = a->x + a->width  * 0.5f;
+	float ay0 = a->y - a->height * 0.5f;
+	float ay1 = a->y + a->height * 0.5f;
+	
+	float bx0 = b->x - b->width  * 0.5f;
+	float bx1 = b->x + b->width  * 0.5f;
+	float by0 = b->y - b->height * 0.5f;
+	float by1 = b->y + b->height * 0.5f;
+	
+	float iw = fminf(ax1, bx1) - fmaxf(ax0, bx0);
+	float ih = fminf(ay1, by1) - fmaxf(ay0, by0);
+	
+	if (iw <= 0.0f || ih <= 0.0f) {
+		return 0.0f;
+	}
+	
+	float inter = iw * ih;
+	float area_a = fmaxf(a->width, 0.0f)  * fmaxf(a->height, 0.0f);
+	float area_b = fmaxf(b->width, 0.0f)  * fmaxf(b->height, 0.0f);
+	float uni = area_a + area_b - inter;
+	
+	return uni > 0.0f ? inter / uni : 0.0f;
+}
+
+// Sort predictions by confidence, highest first.
+static int compare_confidence_desc(const void *pa, const void *pb)
+{
+	const OEC_PREDICTION *a = pa;
+	const OEC_PREDICTION *b = pb;
+	
+	if (a->confidence < b->confidence) return 1;
+	if (a->confidence > b->confidence) return -1;
+	
+	return 0;
+}
+
 // Predict function 
 int oec_model_predict(OEC_MODEL *model, const OEC_TENSOR *input, OEC_PREDICTION *prediction)
 {
@@ -954,30 +1023,7 @@ int oec_model_predict(OEC_MODEL *model, const OEC_TENSOR *input, OEC_PREDICTION 
 		}
 	}
 
-	int best_row = (int)(best_idx / (size_t)grid_w);
-	int best_col = (int)(best_idx % (size_t)grid_w);
-
-	float confidence_logit = output->data[0 * plane + best_idx];
-	float x_offset = output->data[1 * plane + best_idx];
-	float y_offset = output->data[2 * plane + best_idx];
-	float w = output->data[3 * plane + best_idx];
-	float h = output->data[4 * plane + best_idx];
-
-	prediction->confidence = 1.0f / (1.0f + expf(-confidence_logit));
-
-	/*
-	 * Invert the cell-relative parameterization used during
-	 * training (see oec_loss_forward/backward): x/y were stored
-	 * as an offset within the responsible cell, not full-image
-	 * coordinates.
-	 */
-	float cell_w = 1.0f / (float)grid_w;
-	float cell_h = 1.0f / (float)grid_h;
-
-	prediction->x = ((float)best_col + x_offset) * cell_w;
-	prediction->y = ((float)best_row + y_offset) * cell_h;
-	prediction->width  = w;
-	prediction->height = h;
+	decode_cell(output, best_idx, prediction);
 
 	oec_tensor_free(output);
 
@@ -1044,3 +1090,92 @@ int oec_model_predict2(OEC_MODEL *model, const OEC_TENSOR *input, OEC_PREDICTION
 	return 0;
 }
 
+int oec_model_predict_all(
+	OEC_MODEL *model,
+	const OEC_TENSOR *input,
+	OEC_PREDICTION *results,
+	int max_results,
+	float conf_threshold,
+	float nms_iou)
+{
+	if (model == NULL || input == NULL || results == NULL || max_results <= 0) {
+		fprintf(stderr, "predict_all: invalid argument\n");
+		return -1;
+	}
+	
+	if (model->count <= 0 || model->outputs == NULL ||
+	    model->outputs[model->count - 1] == NULL) {
+		fprintf(stderr, "predict_all: model has not been built\n");
+		return -1;
+	}
+	
+	const OEC_TENSOR *last = model->outputs[model->count - 1];
+	
+	if (last->c != 5) {
+		fprintf(stderr, "predict_all: model's final layer must output 5 channels, got %d\n", last->c);
+		return -1;
+	}
+	
+	OEC_TENSOR *output = oec_tensor_create(last->w, last->h, last->c);
+	
+	if (output == NULL) {
+		fprintf(stderr, "predict_all: failed to create output tensor\n");
+		return -1;
+	}
+	
+	if (oec_model_forward(model, input, output) != 0) {
+		oec_tensor_free(output);
+		fprintf(stderr, "predict_all: model forward failed\n");
+		return -1;
+	}
+	
+	size_t plane = (size_t)output->w * (size_t)output->h;
+	
+	OEC_PREDICTION *candidates = malloc(plane * sizeof(*candidates));
+	
+	if (candidates == NULL) {
+		oec_tensor_free(output);
+		return -1;
+	}
+	
+	// Decode every cell and keep those above the threshold.
+	size_t candidate_count = 0;
+	
+	for (size_t idx = 0; idx < plane; idx++) {
+		OEC_PREDICTION p;
+		
+		decode_cell(output, idx, &p);
+		
+		if (p.confidence >= conf_threshold) {
+			candidates[candidate_count++] = p;
+		}
+	}
+	
+	oec_tensor_free(output);
+	
+	qsort(candidates, candidate_count, sizeof(*candidates), compare_confidence_desc);
+	
+	// Greedy non-maximum suppression, best box first.
+	int kept = 0;
+	
+	for (size_t i = 0; i < candidate_count && kept < max_results; i++) {
+		int suppressed = 0;
+		
+		if (nms_iou < 1.0f) {
+			for (int k = 0; k < kept; k++) {
+				if (prediction_iou(&candidates[i], &results[k]) > nms_iou) {
+					suppressed = 1;
+					break;
+				}
+			}
+		}
+		
+		if (!suppressed) {
+			results[kept++] = candidates[i];
+		}
+	}
+	
+	free(candidates);
+	
+	return kept;
+}

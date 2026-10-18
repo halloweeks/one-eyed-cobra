@@ -77,10 +77,35 @@ OEC_MODEL *oec_model_load(
 	const char *path
 );
 
+/*
+ * Best single detection (the highest-confidence cell).
+ */
 int oec_model_predict(
 	OEC_MODEL *model,
 	const OEC_TENSOR *input,
 	OEC_PREDICTION *prediction
+);
+
+/*
+ * All detections in one image.
+ *
+ * Every grid cell is decoded. Cells with confidence >= conf_threshold are
+ * kept, sorted by confidence (highest first), then overlapping duplicates are
+ * removed with non-maximum suppression: a box is dropped when its IoU with an
+ * already kept, higher-confidence box is greater than nms_iou. Use
+ * nms_iou >= 1.0 to disable suppression.
+ *
+ * At most max_results detections are written to results (highest
+ * confidence first). Returns the number written (0 = nothing found),
+ * or -1 on error.
+ */
+int oec_model_predict_all(
+	OEC_MODEL *model,
+	const OEC_TENSOR *input,
+	OEC_PREDICTION *results,
+	int max_results,
+	float conf_threshold,
+	float nms_iou
 );
 
 

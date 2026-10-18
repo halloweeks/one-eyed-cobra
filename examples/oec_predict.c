@@ -16,7 +16,12 @@
 // core implement 
 #include "oec.h"
 
-int main(void) {
+// Detection settings
+#define OEC_PREDICT_MAX_RESULTS 32
+#define OEC_PREDICT_CONFIDENCE  0.20f
+#define OEC_PREDICT_NMS_IOU     0.45f
+
+int main(int argc, const char *argv[]) {
 	OecImage image;
 	OEC_TENSOR *input;
 	
@@ -28,7 +33,7 @@ int main(void) {
 		return EXIT_FAILURE;
 	}
 	
-	if (oec_image_load("dataset/train/images/img_00004.png", &image) != 0) {
+	if (oec_image_load(argv[1], &image) != 0) {
 		fprintf(stderr, "Failed to load input image\n");
 		oec_model_free(model);
 		return EXIT_FAILURE;
@@ -50,11 +55,19 @@ int main(void) {
 		return EXIT_FAILURE;
 	}
 	
-	// Prediction result
-	OEC_PREDICTION output = {0};
-		
-	// Run prediction 
-	if (oec_model_predict(model, input, &output) != 0) {
+	// All detections above the threshold, after removing duplicates.
+	OEC_PREDICTION results[OEC_PREDICT_MAX_RESULTS];
+	
+	int found = oec_model_predict_all(
+		model,
+		input,
+		results,
+		OEC_PREDICT_MAX_RESULTS,
+		OEC_PREDICT_CONFIDENCE,
+		OEC_PREDICT_NMS_IOU
+	);
+	
+	if (found < 0) {
 		fprintf(stderr, "Prediction failed!\n");
 		oec_image_free(&image);
 		oec_model_free(model);
@@ -62,23 +75,13 @@ int main(void) {
 		return EXIT_FAILURE;
 	}
 	
-	// Detection threshold
-	if (output.confidence < 0.20) {
+	if (found == 0) {
 		printf("Target not found!\n");
-		printf("presence = %.6f\n", output.confidence);
 		oec_image_free(&image);
 		oec_model_free(model);
 		oec_tensor_free(input);
 		return EXIT_FAILURE;
 	}
-	
-	// Show prediction information 
-	printf("Target found!\n");
-	printf("presence = %f\n", output.confidence);
-	printf("x = %f\n", output.x);
-	printf("y = %f\n", output.y);
-	printf("w = %f\n", output.width);
-	printf("h = %f\n", output.height);
 	
 	// Drawing and saving work on RGB, so make an RGB view (gray input is replicated).
 	OecImage view;
@@ -91,18 +94,28 @@ int main(void) {
 		return EXIT_FAILURE;
 	}
 	
-	// Draw box on that image with predicted information 
-	oec_image_draw_box(
-		&view,
-		output.x,
-		output.y,
-		output.width,
-		output.height,
-		1,
-		0.0f,
-		1.0f,
-		0.0f
-	);
+	printf("Targets found: %d\n", found);
+	
+	for (int i = 0; i < found; i++) {
+		const OEC_PREDICTION *p = &results[i];
+		
+		// Show prediction information 
+		printf("[%d] presence = %f  x = %f  y = %f  w = %f  h = %f\n",
+			i, p->confidence, p->x, p->y, p->width, p->height);
+		
+		// Draw box on that image with predicted information 
+		oec_image_draw_box(
+			&view,
+			p->x,
+			p->y,
+			p->width,
+			p->height,
+			1,
+			0.0f,
+			1.0f,
+			0.0f
+		);
+	}
 	
 	// Save output visual image 
 	if (oec_image_save_png("prediction/predict_00003.png", &view) != 0) {

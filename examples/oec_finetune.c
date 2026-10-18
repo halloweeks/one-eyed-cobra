@@ -122,7 +122,8 @@ int main(void)
 			
 			OEC_SAMPLE_DATA data = oec_dataset_load_sample(sample, input);
 			
-			OEC_TARGET target = select_target(&data);
+			// Every labeled box becomes a training target.
+			OEC_TARGETS targets = select_targets(&data);
 			
 			oec_optimizer_zero_grad(model);
 			
@@ -131,10 +132,10 @@ int main(void)
 				goto oec_exit;
 			}
 			
-			float sample_loss = oec_loss_forward(loss, output, &target);
+			float sample_loss = oec_loss_forward_multi(loss, output, &targets);
 			total_loss += sample_loss;
 			
-			if (oec_loss_backward(loss, output, &target, grad) != 0) {
+			if (oec_loss_backward_multi(loss, output, &targets, grad) != 0) {
 				fprintf(stderr, "Loss backward failed\n");
 				goto oec_exit;
 			}
