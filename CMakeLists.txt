@@ -64,6 +64,9 @@ if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
             -Wextra
             -Wpedantic
             -march=native
+            -Rpass=loop-vectorize
+            -Rpass-missed=loop-vectorize
+            -O3
     )
     
     target_compile_options(
@@ -91,6 +94,7 @@ if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
             -Wextra
             -Wpedantic
             -march=native
+            
     )
     
     
